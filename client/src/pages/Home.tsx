@@ -1,4 +1,4 @@
-import type { KeyboardEvent, MouseEvent } from "react";
+﻿import type { KeyboardEvent, MouseEvent } from "react";
 import { useMemo } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router-dom";
@@ -12,10 +12,9 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   canContinueDirector,
-  canContinueFront10AutoExecution,
+  canContinueChapterBatchAutoExecution,
   canEnterChapterExecution,
   getCandidateSelectionLink,
-  getTaskCenterLink,
   getWorkflowBadge,
   getWorkflowDescription,
   isWorkflowRunningInBackground,
@@ -25,7 +24,7 @@ import {
 import { toast } from "@/components/ui/toast";
 import { resolveWorkflowContinuationFeedback } from "@/lib/novelWorkflowContinuation";
 
-const HOME_NOVEL_FETCH_LIMIT = 100;
+const HOME_NOVEL_FETCH_LIMIT = 12;
 const HOME_RECENT_LIMIT = 6;
 const DIRECTOR_CREATE_LINK = "/novels/create?mode=director";
 const MANUAL_CREATE_LINK = "/novels/create";
@@ -45,7 +44,7 @@ function formatDate(value: string | undefined): string {
 
 function getNovelPriorityScore(novel: HomeNovelItem): number {
   const task = novel.latestAutoDirectorTask ?? null;
-  if (canContinueFront10AutoExecution(task)) {
+  if (canContinueChapterBatchAutoExecution(task)) {
     return 0;
   }
   if (requiresCandidateSelection(task)) {
@@ -105,6 +104,7 @@ export default function Home() {
   const taskQuery = useQuery({
     queryKey: queryKeys.tasks.overview,
     queryFn: getTaskOverview,
+    staleTime: 30_000,
     refetchInterval: (query) => {
       const overview = query.state.data?.data;
       return (overview?.queuedCount ?? 0) > 0 || (overview?.runningCount ?? 0) > 0 ? 4000 : false;
@@ -114,12 +114,13 @@ export default function Home() {
   const novelQuery = useQuery({
     queryKey: queryKeys.novels.list(1, HOME_NOVEL_FETCH_LIMIT),
     queryFn: () => getNovelList({ page: 1, limit: HOME_NOVEL_FETCH_LIMIT }),
+    staleTime: 30_000,
   });
 
   const continueWorkflowMutation = useMutation({
     mutationFn: async (input: {
       taskId: string;
-      mode?: "auto_execute_range";
+      mode?: "resume" | "auto_execute_range";
     }) => continueNovelWorkflow(input.taskId, input.mode ? { continuationMode: input.mode } : undefined),
     onSuccess: async (response, input) => {
       await Promise.all([
@@ -209,7 +210,7 @@ export default function Home() {
       }
     };
 
-    if (canContinueFront10AutoExecution(task)) {
+    if (canContinueChapterBatchAutoExecution(task)) {
       return (
         <Button
           size={size}
@@ -280,10 +281,10 @@ export default function Home() {
       return (
         <Button asChild size={size}>
           <Link
-            to={getTaskCenterLink(task.id)}
+            to={`/novels/${novel.id}/edit?directorTaskId=${task.id}`}
             onClick={stopPropagation ? stopCardClick : undefined}
           >
-            查看任务
+            查看推进状态
           </Link>
         </Button>
       );
@@ -303,23 +304,23 @@ export default function Home() {
 
   return (
     <div className="space-y-4">
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="home-status-summary-grid grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <MetricCard
-          title="自动推进中"
+          title="最近自动推进中"
           value={liveWorkflowCount}
-          hint="当前仍在后台推进中的自动导演或自动执行项目。"
+          hint="最近项目中仍在后台推进的自动导演或自动执行项目。"
           pending={novelQuery.isPending}
         />
         <MetricCard
-          title="待你处理"
+          title="最近待你处理"
           value={actionRequiredCount}
-          hint="等待审核、失败或已取消后需要你决定下一步的项目。"
+          hint="最近项目里等待审核、失败或已取消后需要你决定下一步的项目。"
           pending={novelQuery.isPending}
         />
         <MetricCard
-          title="可进入章节执行"
+          title="最近可进入章节执行"
           value={readyForExecutionCount}
-          hint="已经准备到可开写阶段，可以直接进入章节写作。"
+          hint="最近项目里准备到可开写阶段，可以直接进入章节写作。"
           pending={novelQuery.isPending}
         />
         <MetricCard
@@ -354,6 +355,9 @@ export default function Home() {
             </Button>
             <Button asChild size="lg" variant="outline">
               <Link to={MANUAL_CREATE_LINK}>手动创建小说</Link>
+            </Button>
+            <Button asChild size="lg" variant="outline">
+              <Link to="/help">新手上路</Link>
             </Button>
           </div>
         </CardContent>
@@ -431,7 +435,7 @@ export default function Home() {
                   {renderNovelPrimaryAction(primaryNovel, { size: "lg" })}
                   {primaryNovel.latestAutoDirectorTask ? (
                     <Button asChild size="lg" variant="outline">
-                      <Link to={getTaskCenterLink(primaryNovel.latestAutoDirectorTask.id)}>任务中心</Link>
+                      <Link to={`/novels/${primaryNovel.id}/edit?directorTaskId=${primaryNovel.latestAutoDirectorTask.id}&taskPanel=1`}>执行详情</Link>
                     </Button>
                   ) : (
                     <Button asChild size="lg" variant="outline">
@@ -452,6 +456,9 @@ export default function Home() {
                 </Button>
                 <Button asChild variant="outline">
                   <Link to={MANUAL_CREATE_LINK}>手动创建小说</Link>
+                </Button>
+                <Button asChild variant="outline">
+                  <Link to="/help">新手上路</Link>
                 </Button>
               </div>
             </div>
@@ -475,7 +482,10 @@ export default function Home() {
             <Link to="/book-analysis">新建拆书</Link>
           </Button>
           <Button asChild variant="outline">
-            <Link to="/tasks">打开任务中心</Link>
+            <Link to="/tasks">后台任务</Link>
+          </Button>
+          <Button asChild variant="outline">
+            <Link to="/help">新手上路</Link>
           </Button>
         </CardContent>
       </Card>
@@ -572,7 +582,7 @@ export default function Home() {
                         {renderNovelPrimaryAction(novel, { stopPropagation: true })}
                         {workflowTask ? (
                           <Button asChild size="sm" variant="outline">
-                            <Link to={getTaskCenterLink(workflowTask.id)} onClick={stopCardClick}>任务中心</Link>
+                            <Link to={`/novels/${novel.id}/edit?directorTaskId=${workflowTask.id}&taskPanel=1`} onClick={stopCardClick}>执行详情</Link>
                           </Button>
                         ) : (
                           <Button asChild size="sm" variant="outline">

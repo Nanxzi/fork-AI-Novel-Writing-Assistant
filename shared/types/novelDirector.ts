@@ -10,11 +10,14 @@ import type {
   StoryPlanLevel,
 } from "./novel";
 import type { LLMProvider } from "./llm";
+import type { ArtifactSyncMode } from "./novel";
 import type { BookAnalysisSectionKey } from "./bookAnalysis";
 import type { NovelWorkflowResumeTarget, NovelWorkflowStage } from "./novelWorkflow";
 import type { StoryMacroPlan } from "./storyMacro";
 import type { BookContract, BookContractDraft } from "./novelWorkflow";
 import type { TitleFactorySuggestion } from "./title";
+import type { StyleIntentSummary } from "./styleEngine";
+import type { DirectorAutoApprovalConfig } from "./autoDirectorApproval";
 
 export const DIRECTOR_CORRECTION_PRESETS = [
   {
@@ -77,6 +80,7 @@ export const DIRECTOR_CANDIDATE_SETUP_STEPS = [
 export type DirectorCandidateSetupStepKey = typeof DIRECTOR_CANDIDATE_SETUP_STEPS[number]["key"];
 
 export const DIRECTOR_RUN_MODES = [
+  "full_book_autopilot",
   "auto_to_ready",
   "auto_to_execution",
   "stage_review",
@@ -84,8 +88,101 @@ export const DIRECTOR_RUN_MODES = [
 
 export type DirectorRunMode = typeof DIRECTOR_RUN_MODES[number];
 
+export const DIRECTOR_AUTO_EXECUTION_RUN_MODES = [
+  "auto_to_execution",
+  "full_book_autopilot",
+] as const;
+
+export type DirectorAutoExecutionRunMode = typeof DIRECTOR_AUTO_EXECUTION_RUN_MODES[number];
+
+export const DIRECTOR_FULL_BOOK_AUTOPILOT_RUN_MODE = "full_book_autopilot" as const;
+
+export const DIRECTOR_FULL_BOOK_AUTOPILOT_INTERRUPT_REASONS = [
+  "model_unavailable",
+  "service_unavailable",
+  "protected_user_content",
+  "unrecoverable_data_risk",
+  "auto_repair_exhausted",
+] as const;
+
+export type DirectorFullBookAutopilotInterruptReason = typeof DIRECTOR_FULL_BOOK_AUTOPILOT_INTERRUPT_REASONS[number];
+
+export const DIRECTOR_CIRCUIT_BREAKER_REASONS = [
+  "auto_repair_exhausted",
+  "replan_loop",
+  "model_unavailable",
+  "service_unavailable",
+  "protected_user_content",
+  "unrecoverable_data_risk",
+  "usage_anomaly",
+] as const;
+
+export type DirectorCircuitBreakerReason = typeof DIRECTOR_CIRCUIT_BREAKER_REASONS[number];
+
+export interface DirectorCircuitBreakerState {
+  status: "closed" | "open";
+  reason?: DirectorCircuitBreakerReason | null;
+  message?: string | null;
+  openedAt?: string | null;
+  resetAt?: string | null;
+  chapterId?: string | null;
+  chapterOrder?: number | null;
+  nodeKey?: string | null;
+  failureCount?: number;
+  patchFailureCount?: number;
+  replanLoopCount?: number;
+  modelFailureCount?: number;
+  usageAnomalyCount?: number;
+  lastUsageRecordId?: string | null;
+  lastEventAt?: string | null;
+  recoveryAction?: "retry" | "resume_after_review" | "switch_model" | "confirm_protected_content" | "manual_repair" | null;
+}
+
+export type DirectorQualityLoopBudgetAttemptAction =
+  | "patch_repair"
+  | "chapter_rewrite"
+  | "window_replan"
+  | "defer_and_continue";
+
+export type DirectorQualityLoopBudgetNextAction =
+  | "auto_patch_repair"
+  | "auto_rewrite_chapter"
+  | "auto_replan_window"
+  | "defer_and_continue";
+
+export interface DirectorQualityLoopBudgetWindow {
+  startOrder?: number | null;
+  endOrder?: number | null;
+  chapterOrders?: number[];
+  chapterIds?: string[];
+}
+
+export interface DirectorQualityLoopBudgetEntry {
+  signatureKey: string;
+  issueSignature: string;
+  blockingLedgerKeys: string[];
+  affectedChapterWindow: DirectorQualityLoopBudgetWindow;
+  patchRepairCount: number;
+  chapterRewriteCount: number;
+  windowReplanCount: number;
+  deferredCount: number;
+  lastAction?: DirectorQualityLoopBudgetAttemptAction | null;
+  lastReason?: string | null;
+  lastChapterId?: string | null;
+  lastChapterOrder?: number | null;
+  updatedAt: string;
+}
+
+export interface DirectorQualityLoopBudgetLedger {
+  entries: DirectorQualityLoopBudgetEntry[];
+  updatedAt?: string | null;
+}
+
+export const DIRECTOR_MIN_TARGET_CHAPTER_COUNT = 12;
+export const DIRECTOR_MAX_TARGET_CHAPTER_COUNT = 2000;
+
 export const DIRECTOR_AUTO_EXECUTION_MODES = [
-  "front10",
+  "book",
   "chapter_range",
   "volume",
 ] as const;
@@ -99,9 +196,60 @@ export interface DirectorAutoExecutionPlan {
   volumeOrder?: number;
   autoReview?: boolean;
   autoRepair?: boolean;
+  artifactSyncMode?: ArtifactSyncMode;
 }
 
-export type DirectorContinuationMode = "resume" | "auto_execute_range" | "auto_execute_front10";
+export interface DirectorFullBookAutopilotContract {
+  runMode: typeof DIRECTOR_FULL_BOOK_AUTOPILOT_RUN_MODE;
+  autoExecutionPlan: DirectorAutoExecutionPlan & {
+    mode: "book";
+    autoReview: true;
+    autoRepair: true;
+  };
+  userApprovalBoundary: "infrastructure_or_data_risk";
+  interruptReasons: readonly DirectorFullBookAutopilotInterruptReason[];
+}
+
+export const DIRECTOR_FULL_BOOK_AUTOPILOT_CONTRACT = {
+  runMode: DIRECTOR_FULL_BOOK_AUTOPILOT_RUN_MODE,
+  autoExecutionPlan: {
+    mode: "book",
+    autoReview: true,
+    autoRepair: true,
+  },
+  userApprovalBoundary: "infrastructure_or_data_risk",
+  interruptReasons: DIRECTOR_FULL_BOOK_AUTOPILOT_INTERRUPT_REASONS,
+} as const satisfies DirectorFullBookAutopilotContract;
+
+export function isDirectorAutoExecutionRunMode(
+  runMode: DirectorRunMode | string | null | undefined,
+): runMode is DirectorAutoExecutionRunMode {
+  return typeof runMode === "string"
+    && (DIRECTOR_AUTO_EXECUTION_RUN_MODES as readonly string[]).includes(runMode);
+}
+
+export function isFullBookAutopilotRunMode(
+  runMode: DirectorRunMode | string | null | undefined,
+): runMode is typeof DIRECTOR_FULL_BOOK_AUTOPILOT_RUN_MODE {
+  return runMode === DIRECTOR_FULL_BOOK_AUTOPILOT_RUN_MODE;
+}
+
+export function buildFullBookAutopilotExecutionPlan(): DirectorAutoExecutionPlan {
+  return {
+    ...DIRECTOR_FULL_BOOK_AUTOPILOT_CONTRACT.autoExecutionPlan,
+  };
+}
+
+export type DirectorContinuationMode = "resume" | "auto_execute_range" | "skip_quality_repair";
+
+export function normalizeDirectorContinuationMode(
+  value: unknown,
+): DirectorContinuationMode | null {
+  if (value === "resume" || value === "auto_execute_range" || value === "skip_quality_repair") {
+    return value;
+  }
+  return null;
+}
 
 export interface DirectorAutoExecutionState extends DirectorAutoExecutionPlan {
   enabled: boolean;
@@ -110,6 +258,16 @@ export interface DirectorAutoExecutionState extends DirectorAutoExecutionPlan {
   preparedVolumeIds?: string[];
   skippedChapterIds?: string[];
   skippedChapterOrders?: number[];
+  qualityDebtChapterIds?: string[];
+  qualityDebtChapterOrders?: number[];
+  qualityDebtSummaries?: Array<{
+    chapterId?: string | null;
+    chapterOrder?: number | null;
+    reason: string;
+    source: "quality_loop" | "replan_loop" | "repair_failure" | "review_skip";
+    deferredAt: string;
+  }>;
+  qualityLoopLedger?: DirectorQualityLoopBudgetLedger | null;
   firstChapterId?: string | null;
   startOrder?: number;
   endOrder?: number;
@@ -122,6 +280,20 @@ export interface DirectorAutoExecutionState extends DirectorAutoExecutionPlan {
   nextChapterOrder?: number | null;
   pipelineJobId?: string | null;
   pipelineStatus?: PipelineJobStatus | null;
+  qualityRepairRisk?: DirectorQualityRepairRisk | null;
+  circuitBreaker?: DirectorCircuitBreakerState | null;
+}
+
+export type DirectorQualityRepairRiskLevel = "low" | "large_scope" | "replan";
+
+export interface DirectorQualityRepairRisk {
+  riskLevel: DirectorQualityRepairRiskLevel;
+  autoContinuable: boolean;
+  reason: string;
+  noticeCode?: string | null;
+  repairMode?: string | null;
+  affectedChapterCount?: number;
+  remainingChapterCount?: number;
 }
 
 export const DIRECTOR_TAKEOVER_START_PHASES = [
@@ -174,7 +346,7 @@ export interface DirectorSessionState {
     | "character_setup"
     | "volume_strategy"
     | "structured_outline"
-    | "front10_ready";
+    | "chapter_execution";
   reviewScope?: DirectorLockScope | null;
 }
 
@@ -233,8 +405,13 @@ export interface DirectorTaskNotice {
 export interface DirectorTaskSeedPayloadSnapshot {
   idea?: string;
   batches?: DirectorCandidateBatch[];
+  directorCommandResults?: Record<string, unknown>;
   runMode?: DirectorRunMode;
   autoExecutionPlan?: DirectorAutoExecutionPlan;
+  autoApproval?: DirectorAutoApprovalConfig | null;
+  styleProfileId?: string | null;
+  styleIntentSummary?: StyleIntentSummary | null;
+  postGenerationStyleReviewEnabled?: boolean | null;
   taskNotice?: DirectorTaskNotice | null;
 }
 
@@ -290,7 +467,7 @@ export interface DirectorTakeoverPipelineJobSnapshot {
 }
 
 export interface DirectorTakeoverCheckpointSnapshot {
-  checkpointType: "front10_ready" | "chapter_batch_ready" | "replan_required" | null;
+  checkpointType: "chapter_batch_ready" | "replan_required" | null;
   checkpointSummary?: string | null;
   chapterId?: string | null;
   chapterOrder?: number | null;
@@ -318,6 +495,12 @@ export interface DirectorTakeoverReadinessResponse {
     volumeCount: number;
     firstVolumeId?: string | null;
     firstVolumeChapterCount: number;
+    volumeChapterRanges?: Array<{
+      volumeOrder: number;
+      startOrder: number;
+      endOrder: number;
+    }>;
+    structuredOutlineChapterOrders?: number[];
     firstVolumeBeatSheetReady?: boolean;
     firstVolumePreparedChapterCount?: number;
     generatedChapterCount?: number;
@@ -337,6 +520,9 @@ export interface DirectorTakeoverRequest extends DirectorLLMOptions {
   entryStep?: DirectorTakeoverEntryStep;
   strategy?: DirectorTakeoverStrategy;
   autoExecutionPlan?: DirectorAutoExecutionPlan;
+  autoApproval?: DirectorAutoApprovalConfig;
+  styleProfileId?: string;
+  postGenerationStyleReviewEnabled?: boolean;
 }
 
 export interface DirectorTakeoverResponse {
@@ -364,11 +550,15 @@ export interface DirectorProjectContextInput {
   worldId?: string;
   writingMode?: "original" | "continuation";
   projectMode?: ProjectMode;
+  readerChannelPreference?: "ai_judge" | "male_oriented" | "female_oriented" | "general";
   narrativePov?: NarrativePov;
   pacePreference?: PacePreference;
   styleTone?: string;
+  styleProfileId?: string;
+  styleIntentSummary?: StyleIntentSummary;
   emotionIntensity?: EmotionIntensity;
   aiFreedom?: AIFreedom;
+  postGenerationStyleReviewEnabled?: boolean;
   defaultChapterLength?: number;
   estimatedChapterCount?: number;
   projectStatus?: ProjectProgressStatus;
@@ -384,6 +574,24 @@ export interface DirectorProjectContextInput {
 export interface DirectorCandidatesRequest extends DirectorProjectContextInput, DirectorLLMOptions {
   idea: string;
   workflowTaskId?: string;
+}
+
+export interface DirectorIdeaInspirationRequest extends DirectorProjectContextInput, DirectorLLMOptions {
+  currentIdea?: string;
+  genreLabel?: string;
+  primaryStoryModeLabel?: string;
+  secondaryStoryModeLabel?: string;
+  worldName?: string;
+}
+
+export interface DirectorIdeaInspiration {
+  angle: string;
+  text: string;
+  tags: string[];
+}
+
+export interface DirectorIdeaInspirationsResponse {
+  ideas: DirectorIdeaInspiration[];
 }
 
 export interface DirectorRefinementRequest extends DirectorProjectContextInput, DirectorLLMOptions {
@@ -420,6 +628,7 @@ export interface DirectorConfirmRequest extends DirectorProjectContextInput, Dir
   candidate: DirectorCandidate;
   workflowTaskId?: string;
   autoExecutionPlan?: DirectorAutoExecutionPlan;
+  autoApproval?: DirectorAutoApprovalConfig;
 }
 
 export interface DirectorPlanScene {

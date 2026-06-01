@@ -1,8 +1,17 @@
 import type { RagOwnerType } from "../../rag/types";
 import { prisma } from "../../../db/prisma";
+import { withSqliteRetry } from "../../../db/sqliteRetry";
 import { ragServices } from "../../rag";
 import { briefSummary, extractFacts } from "../novelP0Utils";
 import { chapterArtifactBackgroundSyncService } from "./ChapterArtifactBackgroundSyncService";
+import { assertChapterContentNotEmpty } from "./chapterEmptyContentError";
+import type { ArtifactSyncMode } from "../novelCoreShared";
+
+export interface ChapterArtifactSyncOptions {
+  scheduleBackgroundSync?: boolean;
+  artifactSyncMode?: ArtifactSyncMode;
+  syncArtifacts?: boolean;
+}
 
 export class ChapterArtifactSyncService {
   async saveDraftAndArtifacts(
@@ -10,55 +19,86 @@ export class ChapterArtifactSyncService {
     chapterId: string,
     content: string,
     generationState: "drafted" | "repaired",
+    options: ChapterArtifactSyncOptions = {},
   ): Promise<void> {
-    await prisma.chapter.update({
-      where: { id: chapterId },
-      data: {
-        content,
-        generationState,
-        chapterStatus: "generating",
-      },
+    const safeContent = assertChapterContentNotEmpty(content, {
+      novelId,
+      chapterId,
+      source: "chapter_artifact_save",
     });
-    await this.syncChapterArtifacts(novelId, chapterId, content);
+    await withSqliteRetry(
+      () => prisma.chapter.update({
+        where: { id: chapterId },
+        data: {
+          content: safeContent,
+          generationState,
+          chapterStatus: "generating",
+        },
+      }),
+      { label: "chapterArtifactSync.chapter.update" },
+    );
+    if (options.syncArtifacts === false) {
+      return;
+    }
+    await this.syncChapterArtifacts(novelId, chapterId, safeContent, options);
   }
 
-  private async syncChapterArtifacts(novelId: string, chapterId: string, content: string): Promise<void> {
+  async syncChapterArtifacts(
+    novelId: string,
+    chapterId: string,
+    content: string,
+    options: ChapterArtifactSyncOptions = {},
+  ): Promise<void> {
     const facts = extractFacts(content);
     const summary = briefSummary(content, facts);
 
-    await prisma.$transaction(async (tx) => {
-      await tx.chapterSummary.upsert({
-        where: { chapterId },
-        update: {
-          summary,
-          keyEvents: facts.map((item) => item.content).slice(0, 3).join(""),
-          characterStates: facts.filter((item) => item.category === "character").map((item) => item.content).slice(0, 3).join(""),
-        },
-        create: {
-          novelId,
-          chapterId,
-          summary,
-          keyEvents: facts.map((item) => item.content).slice(0, 3).join(""),
-          characterStates: facts.filter((item) => item.category === "character").map((item) => item.content).slice(0, 3).join(""),
-        },
-      });
-
-      await tx.consistencyFact.deleteMany({ where: { novelId, chapterId } });
-      if (facts.length > 0) {
-        await tx.consistencyFact.createMany({
-          data: facts.map((item) => ({
+    await withSqliteRetry(
+      () => prisma.$transaction(async (tx) => {
+        await tx.chapterSummary.upsert({
+          where: { chapterId },
+          update: {
+            summary,
+            keyEvents: facts.map((item) => item.content).slice(0, 3).join(""),
+            characterStates: facts.filter((item) => item.category === "character").map((item) => item.content).slice(0, 3).join(""),
+          },
+          create: {
             novelId,
             chapterId,
-            category: item.category,
-            content: item.content,
-            source: "chapter_auto_extract",
-          })),
+            summary,
+            keyEvents: facts.map((item) => item.content).slice(0, 3).join(""),
+            characterStates: facts.filter((item) => item.category === "character").map((item) => item.content).slice(0, 3).join(""),
+          },
         });
-      }
-    });
+
+        await tx.consistencyFact.deleteMany({ where: { novelId, chapterId } });
+        if (facts.length > 0) {
+          await tx.consistencyFact.createMany({
+            data: facts.map((item) => ({
+              novelId,
+              chapterId,
+              category: item.category,
+              content: item.content,
+              source: "chapter_auto_extract",
+            })),
+          });
+        }
+      }),
+      { label: "chapterArtifactSync.summaryAndFacts" },
+    );
 
     await this.syncCharacterTimelineForChapter(novelId, chapterId, content);
-    chapterArtifactBackgroundSyncService.scheduleChapterSync(novelId, chapterId, content);
+    if (options.scheduleBackgroundSync !== false) {
+      const artifactSyncMode = options.artifactSyncMode ?? "adaptive";
+      if (artifactSyncMode === "strict") {
+        await chapterArtifactBackgroundSyncService.runChapterSyncNow(novelId, chapterId, content, {
+          artifactSyncMode,
+        });
+      } else {
+        chapterArtifactBackgroundSyncService.scheduleChapterSync(novelId, chapterId, content, {
+          artifactSyncMode,
+        });
+      }
+    }
     this.queueRagUpsert("chapter", chapterId);
     this.queueRagUpsert("chapter_summary", chapterId);
     this.queueRagUpsert("novel", novelId);
@@ -118,18 +158,21 @@ export class ChapterArtifactSyncService {
       }
     }
 
-    await prisma.$transaction(async (tx) => {
-      await tx.characterTimeline.deleteMany({
-        where: {
-          novelId,
-          chapterId,
-          source: "chapter_extract",
-        },
-      });
-      if (events.length > 0) {
-        await tx.characterTimeline.createMany({ data: events });
-      }
-    });
+    await withSqliteRetry(
+      () => prisma.$transaction(async (tx) => {
+        await tx.characterTimeline.deleteMany({
+          where: {
+            novelId,
+            chapterId,
+            source: "chapter_extract",
+          },
+        });
+        if (events.length > 0) {
+          await tx.characterTimeline.createMany({ data: events });
+        }
+      }),
+      { label: "chapterArtifactSync.characterTimeline" },
+    );
 
     const timelines = await prisma.characterTimeline.findMany({
       where: {

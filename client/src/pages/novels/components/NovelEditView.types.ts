@@ -8,6 +8,8 @@ import type {
   StoryStateSnapshot,
   Character,
   CharacterTimeline,
+  CharacterVisibleProfileBatchResult,
+  CharacterVisibleProfileSuggestion,
   NovelBible,
   PayoffLedgerResponse,
   PipelineJob,
@@ -22,7 +24,7 @@ import type {
   VolumePlan,
   VolumePlanningReadiness,
   VolumePlanDiff,
-  VolumePlanVersion,
+  VolumePlanVersionSummary,
   VolumeRebalanceDecision,
   VolumeStrategyPlan,
   VolumeCritiqueReport,
@@ -43,8 +45,22 @@ import type { BookAnalysisSectionKey } from "@ai-novel/shared/types/bookAnalysis
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
 import type { NovelExportDownloadFormat } from "@ai-novel/shared/types/novelExport";
 import type { ChapterRuntimePackage } from "@ai-novel/shared/types/chapterRuntime";
+import type {
+  CharacterResourceContext,
+  CharacterResourceLedgerItem,
+  CharacterResourceProposalSummary,
+} from "@ai-novel/shared/types/characterResource";
+import type { TimelineCheckReport, TimelineContextForChapter } from "@ai-novel/shared/types/timeline";
 import type { StoryWorldSliceOverrides, StoryWorldSliceView } from "@ai-novel/shared/types/storyWorldSlice";
 import type { UnifiedTaskDetail } from "@ai-novel/shared/types/task";
+import type { AutoDirectorAction, AutoDirectorFollowUpDetail } from "@ai-novel/shared/types/autoDirectorFollowUp";
+import type {
+  DirectorManualEditImpact,
+  DirectorBookAutomationAction,
+  DirectorBookAutomationProjection,
+  DirectorRuntimeSnapshot,
+  DirectorTaskSnapshot,
+} from "@ai-novel/shared/types/directorRuntime";
 import type { ChapterExecutionBackgroundActivity } from "./chapterExecution.shared";
 import type { QuickCharacterCreatePayload } from "./characterPanel.utils";
 import type { ChapterReviewResult } from "../chapterPlanning.shared";
@@ -53,6 +69,7 @@ import type { StructuredSyncOptions } from "../novelEdit.utils";
 import type { NovelBasicFormState } from "../novelBasicInfo.shared";
 import type { ExistingOutlineChapter } from "../volumePlan.utils";
 import type { AITakeoverAction } from "@/components/workflow/AITakeoverContainer";
+import type { LLMSelectorValue } from "@/components/common/LLMSelector";
 import type { SSEFrame } from "@ai-novel/shared/types/api";
 import type { ReactNode } from "react";
 
@@ -152,6 +169,7 @@ export interface OutlineTabViewProps {
   onGoToCharacterTab: () => void;
   latestStateSnapshot?: StoryStateSnapshot | null;
   payoffLedger?: PayoffLedgerResponse | null;
+  characterResources?: CharacterResourceLedgerItem[];
   draftText: string;
   volumes: VolumePlan[];
   onVolumeFieldChange: (volumeId: string, field: keyof Pick<VolumePlan, "title" | "summary" | "openingHook" | "mainPromise" | "primaryPressureSource" | "coreSellingPoint" | "escalationMode" | "protagonistChange" | "midVolumeRisk" | "climax" | "payoffType" | "nextVolumeHook" | "resetPoint">, value: string) => void;
@@ -162,7 +180,7 @@ export interface OutlineTabViewProps {
   onSave: () => void;
   isSaving: boolean;
   volumeMessage: string;
-  volumeVersions: VolumePlanVersion[];
+  volumeVersions: VolumePlanVersionSummary[];
   selectedVersionId: string;
   onSelectedVersionChange: (id: string) => void;
   onCreateDraftVersion: () => void;
@@ -258,6 +276,11 @@ export interface StructuredTabViewProps extends Omit<
   isSaving: boolean;
 }
 
+export interface ChapterTimelineViewData {
+  context: TimelineContextForChapter;
+  latestReport: TimelineCheckReport | null;
+}
+
 export interface ChapterTabViewProps {
   novelId: string;
   worldInjectionSummary: string | null;
@@ -316,6 +339,18 @@ export interface ChapterTabViewProps {
   chapterPlan?: StoryPlan | null;
   latestStateSnapshot?: StoryStateSnapshot | null;
   chapterStateSnapshot?: StoryStateSnapshot | null;
+  chapterResourceContext?: CharacterResourceContext | null;
+  isLoadingChapterResourceContext?: boolean;
+  chapterTimeline?: ChapterTimelineViewData | null;
+  isLoadingChapterTimeline?: boolean;
+  resourceWorkflowMode?: "auto_director" | "manual";
+  pendingCharacterResourceProposals?: CharacterResourceProposalSummary[];
+  onExtractChapterResources?: () => void;
+  isExtractingChapterResources?: boolean;
+  onConfirmCharacterResourceProposal?: (proposalId: string) => void;
+  onRejectCharacterResourceProposal?: (proposalId: string) => void;
+  confirmingCharacterResourceProposalId?: string;
+  rejectingCharacterResourceProposalId?: string;
   chapterAuditReports: AuditReport[];
   backgroundSyncActivities?: ChapterExecutionBackgroundActivity[];
   isGeneratingChapterPlan: boolean;
@@ -449,9 +484,21 @@ export interface CharacterTabViewProps {
   isSyncingAllTimeline: boolean;
   onEvolveCharacter: () => void;
   isEvolvingCharacter: boolean;
+  onGenerateVisibleProfile: (userGuidance?: string) => void;
+  isGeneratingVisibleProfile: boolean;
+  visibleProfileSuggestion?: CharacterVisibleProfileSuggestion | null;
+  onApplyVisibleProfile: () => void;
+  isApplyingVisibleProfile: boolean;
+  onGenerateBatchVisibleProfiles: (userGuidance?: string) => void;
+  isGeneratingBatchVisibleProfiles: boolean;
+  batchVisibleProfileResult?: CharacterVisibleProfileBatchResult | null;
+  onApplyBatchVisibleProfiles: () => void;
+  isApplyingBatchVisibleProfiles: boolean;
   onWorldCheck: () => void;
   isCheckingWorld: boolean;
   selectedCharacter?: Character;
+  characterResources?: CharacterResourceLedgerItem[];
+  pendingCharacterResourceCount?: number;
   characterForm: {
     name: string;
     role: string;
@@ -459,11 +506,31 @@ export interface CharacterTabViewProps {
     personality: string;
     background: string;
     development: string;
+    appearance: string;
+    physique: string;
+    attireStyle: string;
+    signatureDetail: string;
+    voiceTexture: string;
+    presenceImpression: string;
     currentState: string;
     currentGoal: string;
   };
   onCharacterFormChange: (
-    field: "name" | "role" | "gender" | "personality" | "background" | "development" | "currentState" | "currentGoal",
+    field:
+      | "name"
+      | "role"
+      | "gender"
+      | "personality"
+      | "background"
+      | "development"
+      | "appearance"
+      | "physique"
+      | "attireStyle"
+      | "signatureDetail"
+      | "voiceTexture"
+      | "presenceImpression"
+      | "currentState"
+      | "currentGoal",
     value: string,
   ) => void;
   onSaveCharacter: () => void;
@@ -473,7 +540,7 @@ export interface CharacterTabViewProps {
 }
 
 export interface NovelEditTakeoverState {
-  mode: "loading" | "running" | "waiting" | "failed";
+  mode: "loading" | "running" | "waiting" | "action_required" | "failed";
   title: string;
   description: string;
   progress?: number | null;
@@ -492,12 +559,46 @@ export interface NovelTaskDrawerState {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   task: UnifiedTaskDetail | null;
+  snapshot?: DirectorTaskSnapshot | null;
+  runtimeSnapshot?: DirectorRuntimeSnapshot | null;
+  projection?: DirectorBookAutomationProjection | null;
   currentUiModel: {
     provider: string;
     model: string;
     temperature: number;
   };
   actions: AITakeoverAction[];
+  onProjectionAction?: (action: DirectorBookAutomationAction) => void;
+  resourceProposals?: CharacterResourceProposalSummary[];
+  onOpenResourceProposalSource?: (proposal: CharacterResourceProposalSummary) => void;
+  onConfirmResourceProposal?: (proposalId: string) => void;
+  onRejectResourceProposal?: (proposalId: string) => void;
+  confirmingResourceProposalId?: string;
+  rejectingResourceProposalId?: string;
+  followUp?: AutoDirectorFollowUpDetail | null;
+  onFollowUpAction?: (action: AutoDirectorAction) => void;
+  executingFollowUpAction?: boolean;
+  runtimeHardBlocked?: boolean;
+  runtimeBlockedReason?: string | null;
+  manualEditImpact?: DirectorManualEditImpact | null;
+  manualEditImpactLoading?: boolean;
+  onInspectManualEditImpact?: () => void;
+  overrideModel?: LLMSelectorValue;
+  onOverrideModelChange?: (value: LLMSelectorValue) => void;
+  onRetryWithOverrideModel?: () => void;
+  retryWithOverrideModelPending?: boolean;
+  canRetryWithOverrideModel?: boolean;
+  onRetryWithTaskModel?: () => void;
+  retryWithTaskModelPending?: boolean;
+  capabilities?: {
+    availableActions: boolean;
+    availableFollowUps: boolean;
+    canAdjustRuntimePolicy: boolean;
+    canInspectManualEditImpact: boolean;
+    canRetryWithOverrideModel: boolean;
+    canCancel: boolean;
+    canArchive: boolean;
+  };
   onOpenFullTaskCenter: () => void;
 }
 

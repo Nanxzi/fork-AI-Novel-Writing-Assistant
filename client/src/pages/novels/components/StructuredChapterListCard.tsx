@@ -3,6 +3,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
+import { Trash2 } from "lucide-react";
 import {
   getChapterExecutionDetailStatus,
   hasChapterExecutionDetail,
@@ -36,6 +37,7 @@ interface StructuredChapterListCardProps {
   locked: boolean;
   onGenerateChapterList: StructuredTabViewProps["onGenerateChapterList"];
   onAddChapter: StructuredTabViewProps["onAddChapter"];
+  onRemoveChapter: StructuredTabViewProps["onRemoveChapter"];
   onSelectBeatKey: (beatKey: string) => void;
   onSelectChapter: (chapterId: string) => void;
 }
@@ -70,6 +72,7 @@ export default function StructuredChapterListCard(props: StructuredChapterListCa
     locked,
     onGenerateChapterList,
     onAddChapter,
+    onRemoveChapter,
     onSelectBeatKey,
     onSelectChapter,
   } = props;
@@ -155,25 +158,25 @@ export default function StructuredChapterListCard(props: StructuredChapterListCa
       <CardContent className="space-y-3 pt-0">
         {selectedVolumeNeedsChapterExpansion ? (
           <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-xs leading-6 text-amber-800">
-            当前卷目前只有 {selectedVolumeChapters.length} 章，但节奏板已经排到 {selectedVolumeRequiredChapterCount} 章。需要先重新生成当前卷章节列表，后半段节奏才会真正映射到章节。
+            当前卷目前只有 {selectedVolumeChapters.length} 章，但节奏板覆盖到 {selectedVolumeRequiredChapterCount} 章。需要先重新生成当前卷章节列表，后半段节奏才会真正映射到章节。
           </div>
         ) : null}
 
         {selectedVolumeChapters.length > 0 ? (
           <>
-            <div className="max-h-[560px] space-y-3 overflow-y-auto pr-1 xl:max-h-[calc(100vh-12rem)]">
+            <div className="structured-chapter-navigation-list space-y-3 xl:max-h-[calc(100vh-12rem)] xl:overflow-y-auto xl:pr-1">
               {beatGroups.map((group) => {
                 const active = selectedBeatKey === group.key;
                 const expanded = selectedBeatKey === "all" || active;
                 return (
                   <div key={group.key} className="rounded-xl border border-border/70 bg-background/80 p-3">
-                    <div className="flex items-start justify-between gap-3">
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                       <button
                         type="button"
                         onClick={() => onSelectBeatKey(active ? "all" : group.key)}
                         className="min-w-0 flex-1 text-left"
                       >
-                        <div className="flex items-center justify-between gap-2">
+                        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                           <div className="flex flex-wrap items-center gap-2">
                             <Badge variant={active ? "default" : "outline"}>{group.label}</Badge>
                             <Badge variant="secondary">{group.chapterSpanHint}</Badge>
@@ -248,22 +251,45 @@ export default function StructuredChapterListCard(props: StructuredChapterListCa
                   <div className="mt-3 space-y-2">
                     {unmatchedChapters.map((chapter) => {
                       const isSelected = selectedChapter?.id === chapter.id;
+                      const title = chapter.title || `第${chapter.chapterOrder}章`;
                       return (
-                        <button
+                        <div
                           key={chapter.id}
-                          type="button"
-                          onClick={() => onSelectChapter(chapter.id)}
                           className={cn(
-                            "w-full rounded-xl border p-3 text-left transition-colors",
+                            "flex items-start gap-2 rounded-xl border p-3 transition-colors",
                             isSelected ? "border-primary/50 bg-primary/5 shadow-sm" : "border-border/70 hover:border-primary/30",
                           )}
                         >
-                          <div className="flex items-center justify-between gap-2">
-                            <Badge variant={isSelected ? "default" : "outline"}>第{chapter.chapterOrder}章</Badge>
-                            {renderChapterDetailStatusBadge(chapter)}
-                          </div>
-                          <div className="mt-2 text-sm font-medium">{chapter.title || `第${chapter.chapterOrder}章`}</div>
-                        </button>
+                          <button
+                            type="button"
+                            onClick={() => onSelectChapter(chapter.id)}
+                            className="min-w-0 flex-1 text-left"
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <Badge variant={isSelected ? "default" : "outline"}>第{chapter.chapterOrder}章</Badge>
+                              {renderChapterDetailStatusBadge(chapter)}
+                            </div>
+                            <div className="mt-2 text-sm font-medium">{title}</div>
+                          </button>
+                          <Button
+                            type="button"
+                            size="icon"
+                            variant="ghost"
+                            className="h-8 w-8 shrink-0 text-muted-foreground hover:text-destructive"
+                            disabled={locked || selectedVolume.chapters.length <= 1}
+                            title="删除这个未归入节奏段的章节"
+                            onClick={() => {
+                              const confirmed = window.confirm(`确认删除「${title}」？这只会从当前卷的章节拆分中移除该章节。`);
+                              if (!confirmed) {
+                                return;
+                              }
+                              onRemoveChapter(selectedVolume.id, chapter.id);
+                            }}
+                          >
+                            <Trash2 className="h-4 w-4" aria-hidden="true" />
+                            <span className="sr-only">删除这个未归入节奏段的章节</span>
+                          </Button>
+                        </div>
                       );
                     })}
                   </div>

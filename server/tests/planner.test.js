@@ -1,4 +1,4 @@
-﻿const test = require("node:test");
+const test = require("node:test");
 const assert = require("node:assert/strict");
 const { compileIntentToPlan } = require("../dist/agents/planner/compiler.js");
 const { normalizeIntentPayload } = require("../dist/agents/planner/utils.js");
@@ -298,6 +298,24 @@ test("compileIntentToPlan uses production status tool for whole-book progress qu
     chapterSelectors: {},
   }, {
     goal: "What is the full novel production status?",
+    messages: [],
+    contextMode: "novel",
+    novelId: "novel-1",
+  });
+
+  assert.deepEqual(plan.actions.map((item) => item.tool), ["get_novel_production_status"]);
+  assert.deepEqual(plan.actions[0].input, { novelId: "novel-1" });
+});
+
+test("compileIntentToPlan uses production status tool for generic progress questions", () => {
+  const plan = compileIntentToPlan({
+    goal: "How far has this novel progressed?",
+    intent: "query_progress",
+    confidence: 0.9,
+    requiresNovelContext: true,
+    chapterSelectors: {},
+  }, {
+    goal: "How far has this novel progressed?",
     messages: [],
     contextMode: "novel",
     novelId: "novel-1",

@@ -6,11 +6,15 @@ import { llmProviderSchema } from "../llm/providerSchema";
 import { authMiddleware } from "../middleware/auth";
 import { validate } from "../middleware/validate";
 import { recoveryTaskService } from "../services/task/RecoveryTaskService";
+import { AutoDirectorFollowUpActionExecutor } from "../services/task/autoDirectorFollowUps/AutoDirectorFollowUpActionExecutor";
+import { AutoDirectorFollowUpService } from "../services/task/autoDirectorFollowUps/AutoDirectorFollowUpService";
 import { taskCenterService } from "../services/task/TaskCenterService";
 
 const router = Router();
+const autoDirectorFollowUpService = new AutoDirectorFollowUpService();
+const autoDirectorFollowUpActionExecutor = new AutoDirectorFollowUpActionExecutor();
 
-const kindSchema = z.enum(["book_analysis", "novel_pipeline", "knowledge_document", "image_generation", "agent_run", "novel_workflow"]);
+const kindSchema = z.enum(["book_analysis", "novel_pipeline", "knowledge_document", "image_generation", "agent_run", "novel_workflow", "style_extraction"]);
 const statusSchema = z.enum(["queued", "running", "waiting_approval", "succeeded", "failed", "cancelled"]);
 
 const listQuerySchema = z.object({
@@ -33,13 +37,28 @@ const retryBodySchema = z.object({
     temperature: z.number().finite().min(0).max(2).optional(),
   }).optional(),
   resume: z.boolean().optional(),
+  batchAlreadyStartedCount: z.number().int().min(0).optional(),
 });
 
-const recoveryTaskKindSchema = z.enum(["book_analysis", "novel_pipeline", "image_generation", "novel_workflow"]);
+const recoveryTaskKindSchema = z.enum(["book_analysis", "novel_pipeline", "image_generation", "novel_workflow", "style_extraction"]);
 
 const recoveryTaskParamsSchema = z.object({
   kind: recoveryTaskKindSchema,
   id: z.string().trim().min(1),
+});
+
+const autoDirectorFollowUpParamsSchema = z.object({
+  taskId: z.string().trim().min(1),
+});
+
+const autoDirectorFollowUpActionBodySchema = z.object({
+  actionCode: z.enum([
+    "continue_auto_execution",
+    "continue_generic",
+    "retry_with_task_model",
+    "retry_with_route_model",
+  ]),
+  idempotencyKey: z.string().trim().min(1),
 });
 
 router.use(authMiddleware);
@@ -72,11 +91,11 @@ router.get("/recovery-candidates", async (_req, res, next) => {
 
 router.post("/recovery-candidates/resume-all", async (_req, res, next) => {
   try {
-    const resumed = await recoveryTaskService.resumeAllRecoveryCandidates();
-    res.status(200).json({
+    const resumed = await recoveryTaskService.startResumeAllRecoveryCandidates();
+    res.status(202).json({
       success: true,
       data: { resumed },
-      message: "Recovery candidates resumed.",
+      message: "Recovery candidates resume accepted.",
     } satisfies ApiResponse<{ resumed: typeof resumed }>);
   } catch (error) {
     next(error);
@@ -86,12 +105,62 @@ router.post("/recovery-candidates/resume-all", async (_req, res, next) => {
 router.post("/recovery-candidates/:kind/:id/resume", validate({ params: recoveryTaskParamsSchema }), async (req, res, next) => {
   try {
     const { kind, id } = req.params as z.infer<typeof recoveryTaskParamsSchema>;
-    await recoveryTaskService.resumeRecoveryCandidate(kind, id);
+    const command = await recoveryTaskService.startResumeRecoveryCandidate(kind, id);
+    const data = { kind, id, command };
+    res.status(202).json({
+      success: true,
+      data,
+      message: "Recovery candidate resume accepted.",
+    } satisfies ApiResponse<typeof data>);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get("/auto-director-follow-ups/:taskId", validate({ params: autoDirectorFollowUpParamsSchema }), async (req, res, next) => {
+  try {
+    const { taskId } = req.params as z.infer<typeof autoDirectorFollowUpParamsSchema>;
+    const readonly = req.query.revalidate === "true";
+    const data = await autoDirectorFollowUpService.getDetail(taskId, {
+      heal: !readonly,
+    });
+    if (!data) {
+      res.status(404).json({
+        success: false,
+        error: "Auto director follow-up not found.",
+      } satisfies ApiResponse<null>);
+      return;
+    }
     res.status(200).json({
       success: true,
-      data: { kind, id },
-      message: "Recovery candidate resumed.",
-    } satisfies ApiResponse<{ kind: typeof kind; id: string }>);
+      data,
+      message: "Auto director follow-up loaded.",
+    } satisfies ApiResponse<typeof data>);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/auto-director-follow-ups/:taskId/actions", validate({
+  params: autoDirectorFollowUpParamsSchema,
+  body: autoDirectorFollowUpActionBodySchema,
+}), async (req, res, next) => {
+  try {
+    const { taskId } = req.params as z.infer<typeof autoDirectorFollowUpParamsSchema>;
+    const body = req.body as z.infer<typeof autoDirectorFollowUpActionBodySchema>;
+    const data = await autoDirectorFollowUpActionExecutor.execute({
+      directorTaskId: taskId,
+      taskId,
+      actionCode: body.actionCode,
+      source: "web",
+      operatorId: "anonymous",
+      idempotencyKey: body.idempotencyKey,
+    });
+    res.status(200).json({
+      success: true,
+      data,
+      message: data.message,
+    } satisfies ApiResponse<typeof data>);
   } catch (error) {
     next(error);
   }
@@ -145,6 +214,7 @@ router.post("/:kind/:id/retry", validate({ params: taskParamsSchema, body: retry
     const data = await taskCenterService.retryTask(kind, id, {
       llmOverride: body.llmOverride,
       resume: body.resume,
+      batchAlreadyStartedCount: body.batchAlreadyStartedCount,
     });
     res.status(200).json({
       success: true,

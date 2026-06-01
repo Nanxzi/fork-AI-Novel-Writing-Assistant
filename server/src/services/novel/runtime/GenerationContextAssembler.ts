@@ -8,6 +8,7 @@ import { parseJsonStringArray } from "../novelP0Utils";
 import { StyleBindingService } from "../../styleEngine/StyleBindingService";
 import { NovelWorldSliceService } from "../storyWorldSlice/NovelWorldSliceService";
 import { characterDynamicsQueryService } from "../dynamics/CharacterDynamicsQueryService";
+import { characterResourceLedgerService } from "../characterResource/CharacterResourceLedgerService";
 import { payoffLedgerSyncService } from "../../payoff/PayoffLedgerSyncService";
 import { buildSyntheticPayoffIssues } from "../../payoff/payoffLedgerShared";
 import { buildStoryModePromptBlock, normalizeStoryModeOutput } from "../../storyMode/storyModeProfile";
@@ -48,9 +49,29 @@ import {
   buildVolumeWindowContext,
   getRuntimePromptBudgetProfiles,
 } from "../../../prompting/prompts/novel/chapterLayeredContext";
+import { timelineContextService } from "../../../modules/timeline";
+import {
+  buildRuntimeCharacterHardFactsList,
+  parseCharacterProhibitionsJson,
+} from "../characters/characterHardFacts";
 
 const OPENING_COMPARE_LIMIT = 3;
 const OPENING_SLICE_LENGTH = 220;
+
+const runtimeChapterSelect = {
+  id: true,
+  title: true,
+  order: true,
+  content: true,
+  expectation: true,
+  targetWordCount: true,
+  conflictLevel: true,
+  revealLevel: true,
+  mustAvoid: true,
+  taskSheet: true,
+  sceneCards: true,
+  hook: true,
+} as const;
 
 export function buildBlockingPendingReviewProposalWhere(novelId: string, chapterId: string) {
   return {
@@ -65,6 +86,14 @@ export function buildBlockingPendingReviewProposalWhere(novelId: string, chapter
 
 function extractOpening(content: string, maxLength = OPENING_SLICE_LENGTH): string {
   return content.replace(/\s+/g, " ").trim().slice(0, maxLength);
+}
+
+function extractChapterTail(content: string | null | undefined, maxLength = 520): string {
+  const normalized = (content ?? "").replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return "";
+  }
+  return normalized.slice(Math.max(0, normalized.length - maxLength));
 }
 
 function buildWorldContextFromNovel(
@@ -89,6 +118,62 @@ function buildWorldContextFromNovel(
   } | null,
 ): string {
   return buildLegacyWorldContextFromWorld(novel?.world ?? null);
+}
+
+function buildSyntheticCharacterResourceIssues(
+  context: GenerationContextPackage["characterResourceContext"],
+  input: {
+    novelId: string;
+    chapterId: string;
+  },
+): GenerationContextPackage["openAuditIssues"] {
+  if (!context) {
+    return [];
+  }
+  const now = new Date().toISOString();
+  const blockedIssues = context.blockedItems.slice(0, 4).map((item) => ({
+    id: `character-resource:${item.id}:blocked`,
+    reportId: `character-resource:${input.novelId}:${input.chapterId}`,
+    auditType: "continuity" as const,
+    severity: item.status === "destroyed" || item.status === "lost" ? "high" as const : "medium" as const,
+    code: "character_resource_unavailable",
+    description: `${item.name} 当前为 ${item.status}，本章不能直接当作可用资源使用。`,
+    evidence: item.evidence[0]?.summary ?? item.summary,
+    fixSuggestion: `优先做局部修复：补出重新获得、替代资源或不能使用的行动限制，避免无铺垫复用 ${item.name}。`,
+    status: "open" as const,
+    createdAt: now,
+    updatedAt: now,
+  }));
+  const reviewIssues = context.pendingReviewItems.slice(0, 3).map((item) => ({
+    id: `character-resource:${item.id}:pending-review`,
+    reportId: `character-resource:${input.novelId}:${input.chapterId}`,
+    auditType: "continuity" as const,
+    severity: "medium" as const,
+    code: "character_resource_pending_review",
+    description: `${item.name} 的持有、可见性或消耗状态需要确认，确认前不要写成不可逆事实。`,
+    evidence: item.evidence[0]?.summary ?? item.summary,
+    fixSuggestion: `将 ${item.name} 的使用写成可回收的小修补，或先在任务中心确认资源变更。`,
+    status: "open" as const,
+    createdAt: now,
+    updatedAt: now,
+  }));
+  const signalIssues = context.riskSignals
+    .filter((signal) => signal.severity === "high" || signal.severity === "critical")
+    .slice(0, 3)
+    .map((signal, index) => ({
+      id: `character-resource:signal:${index}:${signal.code}`,
+      reportId: `character-resource:${input.novelId}:${input.chapterId}`,
+      auditType: "continuity" as const,
+      severity: signal.severity,
+      code: signal.code || "character_resource_risk",
+      description: signal.summary,
+      evidence: signal.summary,
+      fixSuggestion: "优先采用 patch_first：只修补当前章节的资源归属、消耗或知情关系，不重写整段剧情。",
+      status: "open" as const,
+      createdAt: now,
+      updatedAt: now,
+    }));
+  return [...blockedIssues, ...reviewIssues, ...signalIssues];
 }
 
 function mapPlan(plan: Awaited<ReturnType<typeof plannerService.getChapterPlan>>): GenerationContextPackage["plan"] {
@@ -187,10 +272,23 @@ export class GenerationContextAssembler {
     request: ChapterRuntimeRequestInput,
   ): Promise<{
     novel: { id: string; title: string };
-    chapter: { id: string; title: string; order: number; content: string | null; expectation: string | null; targetWordCount: number | null; sceneCards: string | null };
+    chapter: {
+      id: string;
+      title: string;
+      order: number;
+      content: string | null;
+      expectation: string | null;
+      targetWordCount: number | null;
+      conflictLevel: number | null;
+      revealLevel: number | null;
+      mustAvoid: string | null;
+      taskSheet: string | null;
+      sceneCards: string | null;
+      hook: string | null;
+    };
     contextPackage: GenerationContextPackage;
   }> {
-    const [novel, chapter] = await Promise.all([
+    let [novel, chapter] = await Promise.all([
       prisma.novel.findUnique({
         where: { id: novelId },
         include: {
@@ -237,15 +335,7 @@ export class GenerationContextAssembler {
       }),
       prisma.chapter.findFirst({
         where: { id: chapterId, novelId },
-        select: {
-          id: true,
-          title: true,
-          order: true,
-          content: true,
-          expectation: true,
-          targetWordCount: true,
-          sceneCards: true,
-        },
+        select: runtimeChapterSelect,
       }),
     ]);
 
@@ -254,6 +344,14 @@ export class GenerationContextAssembler {
     }
 
     const ensuredPlan = await plannerService.ensureChapterPlan(novelId, chapterId, request);
+    const refreshedChapter = await prisma.chapter.findFirst({
+      where: { id: chapterId, novelId },
+      select: runtimeChapterSelect,
+    });
+    if (!refreshedChapter) {
+      throw new Error("Novel or chapter not found.");
+    }
+    chapter = refreshedChapter;
     const pendingReviewProposalCountPromise = prisma.stateChangeProposal.count({
       where: buildBlockingPendingReviewProposalWhere(novelId, chapterId),
     });
@@ -272,6 +370,7 @@ export class GenerationContextAssembler {
       continuationPack,
       styleContext,
       payoffLedger,
+      characterResourceContext,
     ] = await Promise.all([
       this.worldSliceService.ensureStoryWorldSlice(novelId, { builderMode: "runtime" }),
       plannerService.buildPlanPromptBlock(novelId, chapterId),
@@ -334,6 +433,9 @@ export class GenerationContextAssembler {
       payoffLedgerSyncService.getPayoffLedger(novelId, {
         chapterOrder: chapter.order,
       }),
+      characterResourceLedgerService.buildContext(novelId, {
+        chapterOrder: chapter.order,
+      }).catch(() => null),
     ]);
 
     const resolvedStateDrivenContext = await contextAssemblyService.build({
@@ -341,9 +443,15 @@ export class GenerationContextAssembler {
       chapterId,
       chapterOrder: chapter.order,
       includeCurrentChapterState: false,
+      policy: request.controlPolicy,
       pendingReviewProposalCount,
       openAuditIssueCount: openAuditIssues.length,
       hasRepairableDraft: Boolean(chapter.content?.trim()),
+    });
+    const timelineContext = await timelineContextService.buildForChapter({
+      novelId,
+      chapterId,
+      chapterIndex: chapter.order,
     });
     const canonicalState = resolvedStateDrivenContext.snapshot;
 
@@ -363,6 +471,21 @@ export class GenerationContextAssembler {
       })),
       chapter.order,
     ));
+    const activeStyleProfileId = styleContext.matchedBindings[0]?.styleProfileId?.trim()
+      || styleContext.matchedBindings[0]?.styleProfile?.id?.trim()
+      || request.taskStyleProfileId?.trim()
+      || "";
+    const novelStyleTone = novel.styleTone?.trim() || "";
+    const filteredToneGuardrails = canonicalState.bookContract.toneGuardrails.filter((item) => {
+      const normalized = item.trim();
+      if (!normalized) {
+        return false;
+      }
+      if (!activeStyleProfileId) {
+        return true;
+      }
+      return !novelStyleTone || normalized !== novelStyleTone;
+    });
     const bookContract = buildBookContractContext({
       title: canonicalState.bookContract.title,
       genre: canonicalState.bookContract.genre ?? null,
@@ -372,9 +495,9 @@ export class GenerationContextAssembler {
       narrativePov: novel.narrativePov,
       pacePreference: novel.pacePreference,
       emotionIntensity: novel.emotionIntensity,
-      toneGuardrails: canonicalState.bookContract.toneGuardrails.length > 0
-        ? canonicalState.bookContract.toneGuardrails
-        : novel.styleTone ? [novel.styleTone] : [],
+      toneGuardrails: filteredToneGuardrails.length > 0
+        ? filteredToneGuardrails
+        : (!activeStyleProfileId && novelStyleTone ? [novelStyleTone] : []),
       hardConstraints: canonicalState.bookContract.hardConstraints.length > 0
         ? canonicalState.bookContract.hardConstraints
         : storyMacroPlan?.constraints ?? [],
@@ -392,10 +515,27 @@ export class GenerationContextAssembler {
         name: item.name,
         role: item.role,
         personality: item.personality ?? null,
+        background: item.background ?? null,
+        development: item.development ?? null,
+        identityLabel: item.identityLabel ?? null,
+        factionLabel: item.factionLabel ?? null,
+        stanceLabel: item.stanceLabel ?? null,
+        powerLevel: item.powerLevel ?? null,
+        realm: item.realm ?? null,
+        currentLocation: item.currentLocation ?? null,
+        availability: item.availability ?? null,
+        prohibitions: parseCharacterProhibitionsJson(item.prohibitionsJson),
         currentState: canonicalCharacter?.currentState ?? item.currentState ?? null,
         currentGoal: canonicalCharacter?.currentGoal ?? item.currentGoal ?? null,
+        appearance: item.appearance ?? null,
+        physique: item.physique ?? null,
+        attireStyle: item.attireStyle ?? null,
+        signatureDetail: item.signatureDetail ?? null,
+        voiceTexture: item.voiceTexture ?? null,
+        presenceImpression: item.presenceImpression ?? null,
       };
     });
+    const mappedCharacterHardFacts = buildRuntimeCharacterHardFactsList(mappedCharacterRoster);
     const mappedCreativeDecisions = decisions.map((item) => ({
       id: item.id,
       chapterId: item.chapterId ?? null,
@@ -434,6 +574,7 @@ export class GenerationContextAssembler {
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       })),
+      buildSyntheticCharacterResourceIssues(characterResourceContext, { novelId, chapterId }),
     );
     const runtimeContinuation = {
       enabled: continuationPack.enabled,
@@ -448,11 +589,16 @@ export class GenerationContextAssembler {
     const summaryText = buildSummaryText(previousChaptersSummary);
     const factText = buildFactText(facts);
     const recentChapterContentText = buildRecentChapterContentText(recentChapters);
+    const previousChapterTail = extractChapterTail(recentChapters[0]?.content);
     const charactersContextText = buildCharactersContextText(
       novel.characters.map((item) => ({
         name: item.name,
         role: item.role,
         personality: item.personality ?? null,
+        appearance: item.appearance ?? null,
+        physique: item.physique ?? null,
+        signatureDetail: item.signatureDetail ?? null,
+        voiceTexture: item.voiceTexture ?? null,
       })),
     );
     const characterDynamicsText = characterDynamics
@@ -502,7 +648,12 @@ export class GenerationContextAssembler {
         content: chapter.content ?? null,
         expectation: chapter.expectation ?? null,
         targetWordCount: chapter.targetWordCount ?? null,
+        conflictLevel: chapter.conflictLevel ?? null,
+        revealLevel: chapter.revealLevel ?? null,
+        mustAvoid: chapter.mustAvoid ?? null,
+        taskSheet: chapter.taskSheet ?? null,
         sceneCards: chapter.sceneCards ?? null,
+        hook: chapter.hook ?? null,
         supportingContextText: "",
       },
       plan: mappedPlan,
@@ -516,9 +667,11 @@ export class GenerationContextAssembler {
       storyWorldSlice,
       characterDynamics,
       characterRoster: mappedCharacterRoster,
+      characterHardFacts: mappedCharacterHardFacts,
       creativeDecisions: mappedCreativeDecisions,
       openAuditIssues: mappedOpenAuditIssues,
       previousChaptersSummary,
+      previousChapterTail,
       openingHint,
       continuation: runtimeContinuation,
       styleContext,
@@ -529,10 +682,33 @@ export class GenerationContextAssembler {
       ledgerUrgentItems: canonicalLedger.ledgerUrgentItems,
       ledgerOverdueItems: canonicalLedger.ledgerOverdueItems,
       ledgerSummary: canonicalLedger.ledgerSummary,
+      timelineContext,
+      characterResourceContext,
       chapterMission: null,
       chapterWriteContext: null,
       chapterReviewContext: null,
       chapterRepairContext: null,
+      contextGatingDecisions: [],
+      chapterChangeFlags: {
+        introducedPayoff: false,
+        payoffResolutionSignal: false,
+        relationshipShiftSignal: false,
+        majorStateShiftSignal: false,
+      },
+      tokenBudgetPolicy: {
+        chapterBudgetProfile: "balanced",
+        stageTokenCap: {
+          writer: 2600,
+          light_audit: 900,
+          full_audit: 2600,
+          repair: 2200,
+        },
+        retryCap: {
+          full_audit: 1,
+          repair: 1,
+        },
+        auditMode: "light",
+      },
       promptBudgetProfiles: getRuntimePromptBudgetProfiles(),
     };
     const chapterWriteContext = buildChapterWriteContext({
@@ -557,7 +733,12 @@ export class GenerationContextAssembler {
         content: chapter.content ?? null,
         expectation: chapter.expectation ?? null,
         targetWordCount: chapter.targetWordCount ?? null,
+        conflictLevel: chapter.conflictLevel ?? null,
+        revealLevel: chapter.revealLevel ?? null,
+        mustAvoid: chapter.mustAvoid ?? null,
+        taskSheet: chapter.taskSheet ?? null,
         sceneCards: chapter.sceneCards ?? null,
+        hook: chapter.hook ?? null,
         supportingContextText: buildSupportingContextText({
           worldBlock,
           storyModeBlock,
@@ -587,9 +768,11 @@ export class GenerationContextAssembler {
       storyWorldSlice,
       characterDynamics,
       characterRoster: mappedCharacterRoster,
+      characterHardFacts: mappedCharacterHardFacts,
       creativeDecisions: mappedCreativeDecisions,
       openAuditIssues: mappedOpenAuditIssues,
       previousChaptersSummary,
+      previousChapterTail,
       openingHint,
       continuation: runtimeContinuation,
       styleContext,
@@ -600,10 +783,33 @@ export class GenerationContextAssembler {
       ledgerUrgentItems: canonicalLedger.ledgerUrgentItems,
       ledgerOverdueItems: canonicalLedger.ledgerOverdueItems,
       ledgerSummary: canonicalLedger.ledgerSummary,
+      timelineContext,
+      characterResourceContext,
       chapterMission: chapterWriteContext.chapterMission,
       chapterWriteContext,
       chapterReviewContext,
       chapterRepairContext,
+      contextGatingDecisions: [],
+      chapterChangeFlags: {
+        introducedPayoff: false,
+        payoffResolutionSignal: false,
+        relationshipShiftSignal: false,
+        majorStateShiftSignal: false,
+      },
+      tokenBudgetPolicy: {
+        chapterBudgetProfile: "balanced",
+        stageTokenCap: {
+          writer: 2600,
+          light_audit: 900,
+          full_audit: 2600,
+          repair: 2200,
+        },
+        retryCap: {
+          full_audit: 1,
+          repair: 1,
+        },
+        auditMode: "light",
+      },
       promptBudgetProfiles: getRuntimePromptBudgetProfiles(),
     };
 
@@ -616,7 +822,12 @@ export class GenerationContextAssembler {
         content: chapter.content ?? null,
         expectation: chapter.expectation ?? null,
         targetWordCount: chapter.targetWordCount ?? null,
+        conflictLevel: chapter.conflictLevel ?? null,
+        revealLevel: chapter.revealLevel ?? null,
+        mustAvoid: chapter.mustAvoid ?? null,
+        taskSheet: chapter.taskSheet ?? null,
         sceneCards: chapter.sceneCards ?? null,
+        hook: chapter.hook ?? null,
       },
       contextPackage,
     };

@@ -5,18 +5,23 @@ import AppLayout from "@/components/layout/AppLayout";
 import { featureFlags } from "@/config/featureFlags";
 
 const Home = lazy(() => import("@/pages/Home"));
+const HelpPage = lazy(() => import("@/pages/help/HelpPage"));
 const NovelList = lazy(() => import("@/pages/novels/NovelList"));
 const NovelCreate = lazy(() => import("@/pages/novels/NovelCreate"));
+const NovelPreview = lazy(() => import("@/pages/novels/NovelPreview"));
 const NovelEdit = lazy(() => import("@/pages/novels/NovelEdit"));
 const NovelChapterEdit = lazy(() => import("@/pages/novels/NovelChapterEdit"));
 const CreativeHubPage = lazy(() => import("@/pages/creativeHub/CreativeHubPage"));
 const ChatPage = lazy(() => import("@/pages/chat/ChatPage"));
 const BookAnalysisPage = lazy(() => import("@/pages/bookAnalysis/BookAnalysisPage"));
 const TaskCenterPage = lazy(() => import("@/pages/tasks/TaskCenterPage"));
+const AutoDirectorFollowUpCenterPage = lazy(() => import("@/pages/autoDirectorFollowUps/AutoDirectorFollowUpCenterPage"));
 const KnowledgePage = lazy(() => import("@/pages/knowledge/KnowledgePage"));
 const GenreManagementPage = lazy(() => import("@/pages/genres/GenreManagementPage"));
 const StoryModeManagementPage = lazy(() => import("@/pages/storyModes/StoryModeManagementPage"));
 const TitleStudioPage = lazy(() => import("@/pages/titles/TitleStudioPage"));
+const PromptWorkbenchPage = lazy(() => import("@/pages/promptWorkbench/PromptWorkbenchPage"));
+const AntiAiRulesPage = lazy(() => import("@/pages/antiAiRules/AntiAiRulesPage"));
 const ModelRoutesPage = lazy(() => import("@/pages/settings/ModelRoutesPage"));
 const SettingsPage = lazy(() => import("@/pages/settings/SettingsPage"));
 const WorldList = lazy(() => import("@/pages/worlds/WorldList"));
@@ -31,8 +36,10 @@ const routes: RouteObject[] = [
     element: <AppLayout />,
     children: [
       { index: true, element: <Home /> },
+      { path: "help", element: <HelpPage /> },
       { path: "novels", element: <NovelList /> },
       { path: "novels/create", element: <NovelCreate /> },
+      { path: "novels/:id/preview", element: <NovelPreview /> },
       { path: "novels/:id/edit", element: <NovelEdit /> },
       { path: "novels/:id/chapters/:chapterId", element: <NovelChapterEdit /> },
       { path: "creative-hub", element: <CreativeHubPage /> },
@@ -40,10 +47,15 @@ const routes: RouteObject[] = [
       { path: "chat", element: <Navigate to="/creative-hub" replace /> },
       { path: "book-analysis", element: <BookAnalysisPage /> },
       { path: "tasks", element: <TaskCenterPage /> },
+      { path: "auto-director/follow-ups", element: <AutoDirectorFollowUpCenterPage /> },
+      { path: "auto-director/follow-up-center", element: <Navigate to="/auto-director/follow-ups" replace /> },
+      { path: "auto-director/followup-center", element: <Navigate to="/auto-director/follow-ups" replace /> },
       { path: "knowledge", element: <KnowledgePage /> },
       { path: "genres", element: <GenreManagementPage /> },
       { path: "story-modes", element: <StoryModeManagementPage /> },
       { path: "titles", element: <TitleStudioPage /> },
+      { path: "prompt-workbench", element: <PromptWorkbenchPage /> },
+      { path: "anti-ai-rules", element: <AntiAiRulesPage /> },
       { path: "settings/model-routes", element: <ModelRoutesPage /> },
       { path: "settings", element: <SettingsPage /> },
       { path: "worlds", element: <WorldList /> },

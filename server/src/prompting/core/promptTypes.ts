@@ -25,6 +25,40 @@ export interface ContextPolicy {
   dropOrder?: string[];
 }
 
+export type PromptContextFreshnessMode = "snapshot" | "fresh" | "hybrid";
+
+export interface PromptContextRequirement {
+  group: string;
+  required?: boolean;
+  priority: number;
+  maxTokens?: number;
+  freshness?: PromptContextFreshnessMode;
+  sourceHint?: string;
+}
+
+export type PromptEditableSlotRiskLevel = "low" | "medium" | "high";
+
+export interface PromptEditableSlot {
+  key: string;
+  label: string;
+  description: string;
+  riskLevel: PromptEditableSlotRiskLevel;
+  maxLength?: number;
+  defaultValue?: string;
+}
+
+export type PromptOverrideScope = "global" | "project" | "novel" | "experiment";
+export type PromptOverrideStatus = "draft" | "published" | "rolled_back";
+
+export interface PromptOverrideDraft {
+  promptId: string;
+  baseVersion: string;
+  scope: PromptOverrideScope;
+  status: PromptOverrideStatus;
+  slots: Record<string, string>;
+  notes?: string;
+}
+
 export interface PromptRenderContext {
   blocks: PromptContextBlock[];
   selectedBlockIds: string[];
@@ -37,9 +71,21 @@ export interface PromptInvocationMeta {
   promptId: string;
   promptVersion: string;
   taskType: TaskType;
+  novelId?: string;
+  chapterId?: string;
+  volumeId?: string;
+  taskId?: string;
+  stage?: string;
+  itemKey?: string;
+  scope?: string;
+  entrypoint?: string;
+  sceneIndex?: number;
+  roundIndex?: number;
+  triggerReason?: string;
   contextBlockIds: string[];
   droppedContextBlockIds: string[];
   summarizedContextBlockIds: string[];
+  customAddendumBlockIds: string[];
   estimatedInputTokens: number;
   repairUsed: boolean;
   repairAttempts: number;
@@ -47,11 +93,48 @@ export interface PromptInvocationMeta {
   semanticRetryAttempts: number;
 }
 
+export interface PromptRunTrace {
+  promptId: string;
+  promptVersion: string;
+  taskType: TaskType;
+  provider?: LLMProvider;
+  model?: string;
+  latencyMs?: number;
+  contextBlockIds: string[];
+  droppedContextBlockIds: string[];
+  summarizedContextBlockIds: string[];
+  customAddendumBlockIds: string[];
+  estimatedInputTokens: number;
+  repairUsed: boolean;
+  repairAttempts: number;
+  semanticRetryUsed: boolean;
+  semanticRetryAttempts: number;
+  entrypoint?: string;
+  novelId?: string;
+  chapterId?: string;
+  taskId?: string;
+  compiledHash?: string;
+  contextSnapshotHash?: string;
+}
+
 export interface PromptExecutionOptions {
   provider?: LLMProvider;
   model?: string;
   temperature?: number;
   maxTokens?: number;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+  novelId?: string;
+  chapterId?: string;
+  volumeId?: string;
+  taskId?: string;
+  stage?: string;
+  itemKey?: string;
+  scope?: string;
+  entrypoint?: string;
+  sceneIndex?: number;
+  roundIndex?: number;
+  triggerReason?: string;
 }
 
 export interface PromptExecutionMeta {
@@ -121,6 +204,8 @@ export interface PromptAsset<I, O, R = O> {
   semanticRetryPolicy?: PromptSemanticRetryPolicy<I, R>;
   outputSchema?: ZodType<R>;
   structuredOutputHint?: PromptStructuredOutputHint<I, R>;
+  editableSlots?: PromptEditableSlot[];
+  contextRequirements?: PromptContextRequirement[];
   render: (input: I, context: PromptRenderContext) => BaseMessage[];
   postValidate?: (output: R, input: I, context: PromptRenderContext) => O;
   postValidateFailureRecovery?: (input: PromptPostValidateFailureRecoveryInput<I, R>) => O;

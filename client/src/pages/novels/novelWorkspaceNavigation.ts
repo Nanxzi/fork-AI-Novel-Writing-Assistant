@@ -1,3 +1,4 @@
+import type { DirectorDisplayStageKey } from "@ai-novel/shared/types/directorRuntime";
 import type { DirectorLockScope } from "@ai-novel/shared/types/novelDirector";
 
 export type NovelWorkspaceFlowTab =
@@ -108,34 +109,59 @@ export function tabFromWorkflowStageName(stage: string | null | undefined): Nove
   }
 }
 
+export function tabFromDirectorDisplayStage(stage: DirectorDisplayStageKey | null | undefined): NovelWorkspaceFlowTab | null {
+  switch (stage) {
+    case "project_setup":
+      return "basic";
+    case "story_planning":
+      return "story_macro";
+    case "character_setup":
+      return "character";
+    case "volume_strategy":
+      return "outline";
+    case "structured_outline":
+      return "structured";
+    case "chapter_execution":
+      return "chapter";
+    case "quality_repair":
+      return "pipeline";
+    default:
+      return null;
+  }
+}
+
 export function tabFromDirectorProgress(input: {
   currentStage?: string | null;
   currentItemKey?: string | null;
   checkpointType?: string | null;
   reviewScope?: DirectorLockScope | null;
+  status?: string | null;
 }): NovelWorkspaceFlowTab | null {
   const reviewTab = tabFromScope(input.reviewScope);
   if (reviewTab) {
     return reviewTab;
   }
 
-  switch (input.checkpointType) {
+  const checkpointTab = (() => {
+    switch (input.checkpointType) {
     case "book_contract_ready":
       return "story_macro";
     case "character_setup_required":
       return "character";
     case "volume_strategy_ready":
       return "outline";
-    case "front10_ready":
-      return "structured";
     case "chapter_batch_ready":
+      return "structured";
     case "workflow_completed":
       return "pipeline";
     default:
       break;
-  }
+    }
+    return null;
+  })();
 
-  switch (input.currentItemKey) {
+  const currentTab = (() => {
+    switch (input.currentItemKey) {
     case "novel_create":
     case "project_setup":
       return "basic";
@@ -155,14 +181,31 @@ export function tabFromDirectorProgress(input: {
     case "chapter_detail_bundle":
       return "structured";
     case "chapter_execution":
+    case "chapter_execution_node":
+    case "chapter.draft.write":
+    case "chapter.write":
       return "chapter";
     case "reviewing":
     case "repairing":
     case "quality_repair":
+    case "chapter_quality_review_node":
+    case "chapter.quality.review":
+    case "chapter_state_commit_node":
+    case "chapter.state.commit":
       return "pipeline";
     default:
       break;
+    }
+    return tabFromWorkflowStageName(input.currentStage);
+  })();
+
+  const shouldPreferActiveCurrentTab = (input.status === "running" || input.status === "queued")
+    && checkpointTab
+    && currentTab
+    && getNovelWorkspaceFlowStepIndex(currentTab) > getNovelWorkspaceFlowStepIndex(checkpointTab);
+  if (shouldPreferActiveCurrentTab) {
+    return currentTab;
   }
 
-  return tabFromWorkflowStageName(input.currentStage);
+  return checkpointTab ?? currentTab;
 }

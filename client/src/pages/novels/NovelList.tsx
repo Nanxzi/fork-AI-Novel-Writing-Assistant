@@ -1,21 +1,32 @@
-import type { KeyboardEvent, MouseEvent } from "react";
-import { useMemo, useState } from "react";
+﻿import type { KeyboardEvent, MouseEvent } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { ProjectProgressStatus } from "@ai-novel/shared/types/novel";
+import type { DirectorContinuationMode } from "@ai-novel/shared/types/novelDirector";
+import type {
+  DirectorBookAutomationAction,
+  DirectorBookAutomationProjection,
+} from "@ai-novel/shared/types/directorRuntime";
 import { Link, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { BookOpen, Gauge, RotateCcw } from "lucide-react";
+import { getDirectorBookAutomationProjection } from "@/api/novelDirector";
 import { continueNovelWorkflow } from "@/api/novelWorkflow";
 import { deleteNovel, downloadNovelExport, getNovelList } from "@/api/novel";
 import { queryKeys } from "@/api/queryKeys";
+import AICockpit from "@/components/autoDirector/AICockpit";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  AppDialogContent,
+  Dialog,
+} from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import {
   canContinueDirector,
-  canContinueFront10AutoExecution,
+  canContinueChapterBatchAutoExecution,
   canEnterChapterExecution,
   getCandidateSelectionLink,
-  getTaskCenterLink,
   getWorkflowBadge,
   getWorkflowDescription,
   isWorkflowRunningInBackground,
@@ -23,12 +34,19 @@ import {
 } from "@/lib/novelWorkflowTaskUi";
 import { toast } from "@/components/ui/toast";
 import { resolveWorkflowContinuationFeedback } from "@/lib/novelWorkflowContinuation";
+import {
+  getDirectorCockpitActionHref,
+  getDirectorCockpitContinuationMode,
+  isDirectorCockpitContinuationAction,
+} from "@/lib/directorCockpitActions";
+import { useTaskRecovery } from "@/components/layout/TaskRecoveryContext";
 import NovelWorkflowRunningIndicator from "./components/NovelWorkflowRunningIndicator";
 
 type StatusFilter = "all" | "draft" | "published";
 type WritingModeFilter = "all" | "original" | "continuation";
 const DIRECTOR_CREATE_LINK = "/novels/create?mode=director";
 const MANUAL_CREATE_LINK = "/novels/create";
+const NOVEL_LIST_PAGE_SIZE = 24;
 
 function createDownload(blob: Blob, fileName: string): void {
   const url = URL.createObjectURL(blob);
@@ -69,10 +87,35 @@ export default function NovelList() {
   const queryClient = useQueryClient();
   const [status, setStatus] = useState<StatusFilter>("all");
   const [writingMode, setWritingMode] = useState<WritingModeFilter>("all");
+  const [cockpitNovelId, setCockpitNovelId] = useState<string | null>(null);
+  const [page, setPage] = useState(1);
+  const { candidateCount: recoveryCandidateCount, openDialog: openRecoveryDialog } = useTaskRecovery();
 
   const novelListQuery = useQuery({
-    queryKey: queryKeys.novels.list(1, 100),
-    queryFn: () => getNovelList({ page: 1, limit: 100 }),
+    queryKey: queryKeys.novels.list(page, NOVEL_LIST_PAGE_SIZE),
+    queryFn: () => getNovelList({ page, limit: NOVEL_LIST_PAGE_SIZE }),
+    staleTime: 30_000,
+    refetchInterval: (query) => {
+      const items = query.state.data?.data?.items ?? [];
+      return items.some((novel) => {
+        const task = novel.latestAutoDirectorTask;
+        return task?.status === "queued" || task?.status === "running" || task?.status === "waiting_approval";
+      })
+        ? 4000
+        : false;
+    },
+  });
+
+  const cockpitProjectionQuery = useQuery({
+    queryKey: cockpitNovelId
+      ? queryKeys.novels.directorBookAutomation(cockpitNovelId)
+      : ["novels", "director-book-automation", "idle"],
+    queryFn: () => getDirectorBookAutomationProjection(cockpitNovelId ?? ""),
+    enabled: Boolean(cockpitNovelId),
+    staleTime: 10_000,
+    refetchInterval: (query) => {
+      return query.state.data?.data?.projection.displayState === "processing" ? 4000 : false;
+    },
   });
 
   const deleteNovelMutation = useMutation({
@@ -105,13 +148,19 @@ export default function NovelList() {
   const continueWorkflowMutation = useMutation({
     mutationFn: async (input: {
       taskId: string;
-      mode?: "auto_execute_range";
+      mode?: DirectorContinuationMode;
     }) => continueNovelWorkflow(input.taskId, input.mode ? { continuationMode: input.mode } : undefined),
     onSuccess: async (response, input) => {
-      await Promise.all([
+      const invalidations = [
         queryClient.invalidateQueries({ queryKey: queryKeys.novels.all }),
         queryClient.invalidateQueries({ queryKey: ["tasks"] }),
-      ]);
+      ];
+      if (cockpitNovelId) {
+        invalidations.push(
+          queryClient.invalidateQueries({ queryKey: queryKeys.novels.directorBookAutomation(cockpitNovelId) }),
+        );
+      }
+      await Promise.all(invalidations);
       const feedback = resolveWorkflowContinuationFeedback(response.data, {
         mode: input.mode,
       });
@@ -133,6 +182,10 @@ export default function NovelList() {
   });
 
   const allNovels = novelListQuery.data?.data?.items ?? [];
+  const totalPages = novelListQuery.data?.data?.totalPages ?? 1;
+  const totalNovels = novelListQuery.data?.data?.total ?? 0;
+  const selectedCockpitNovel = allNovels.find((item) => item.id === cockpitNovelId) ?? null;
+  const cockpitProjection = cockpitProjectionQuery.data?.data?.projection ?? null;
 
   const novels = useMemo(() => {
     return allNovels.filter((item) => {
@@ -145,6 +198,12 @@ export default function NovelList() {
       return true;
     });
   }, [allNovels, status, writingMode]);
+
+  useEffect(() => {
+    if (page > totalPages) {
+      setPage(totalPages);
+    }
+  }, [page, totalPages]);
 
   const handleDelete = (novelId: string, title: string) => {
     const confirmed = window.confirm(`确认删除《${title}》吗？该操作会直接删除当前小说。`);
@@ -160,6 +219,22 @@ export default function NovelList() {
 
   const openNovelEditor = (novelId: string) => {
     navigate(`/novels/${novelId}/edit`);
+  };
+
+  const handleCockpitAction = (
+    projection: DirectorBookAutomationProjection,
+    action: DirectorBookAutomationAction,
+  ) => {
+    const taskId = action.commandPayload?.taskId ?? action.target.taskId ?? projection.latestTask?.id;
+    if (taskId && isDirectorCockpitContinuationAction(action)) {
+      continueWorkflowMutation.mutate({
+        taskId,
+        mode: getDirectorCockpitContinuationMode(action),
+      });
+      return;
+    }
+    setCockpitNovelId(null);
+    navigate(getDirectorCockpitActionHref(projection, action));
   };
 
   return (
@@ -212,6 +287,16 @@ export default function NovelList() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          <Badge variant="outline">
+            第 {page} / {totalPages} 页，共 {totalNovels} 本
+          </Badge>
+          {recoveryCandidateCount > 0 ? (
+            <Button variant="outline" onClick={openRecoveryDialog}>
+              <RotateCcw className="h-4 w-4" aria-hidden="true" />
+              待恢复任务
+              <Badge variant="secondary">{recoveryCandidateCount}</Badge>
+            </Button>
+          ) : null}
           <Button asChild>
             <Link to={DIRECTOR_CREATE_LINK}>AI 自动导演开书</Link>
           </Button>
@@ -273,9 +358,11 @@ export default function NovelList() {
           ) : null}
         </Card>
       ) : (
-        <div className="grid gap-3 md:grid-cols-2">
-          {novels.map((novel) => {
+        <>
+          <div className="grid gap-3 md:grid-cols-2">
+            {novels.map((novel) => {
             const workflowTask = novel.latestAutoDirectorTask ?? null;
+            const workflowCurrentAction = workflowTask?.currentItemLabel?.trim() || "";
             const workflowBadge = getWorkflowBadge(workflowTask);
             const workflowDescription = getWorkflowDescription(workflowTask);
             const isWorkflowRunning = isWorkflowRunningInBackground(workflowTask);
@@ -352,11 +439,11 @@ export default function NovelList() {
                         <NovelWorkflowRunningIndicator
                           className="mt-3"
                           progress={workflowTask.progress}
-                          label={workflowTask.currentItemLabel?.trim() || "AI 正在后台持续推进"}
+                          label={workflowCurrentAction || "AI 正在后台持续推进"}
                         />
                       ) : null}
                       <div className="mt-2 text-xs text-muted-foreground">
-                        当前阶段：{workflowTask.currentStage ?? "自动导演"}{workflowTask.currentItemLabel ? ` · ${workflowTask.currentItemLabel}` : ""}
+                        当前阶段：{workflowTask.currentStage ?? "自动导演"}{workflowCurrentAction ? ` · ${workflowCurrentAction}` : ""}
                       </div>
                       {workflowTask.lastHealthyStage ? (
                         <div className="mt-1 text-xs text-muted-foreground">
@@ -389,7 +476,19 @@ export default function NovelList() {
                   ) : null}
 
                   <div className="flex flex-wrap gap-2">
-                    {canContinueFront10AutoExecution(workflowTask) ? (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={(event) => {
+                        stopCardClick(event);
+                        setCockpitNovelId(novel.id);
+                      }}
+                    >
+                      <Gauge className="h-4 w-4" aria-hidden="true" />
+                      AI 驾驶舱
+                    </Button>
+
+                    {canContinueChapterBatchAutoExecution(workflowTask) ? (
                       <Button
                         size="sm"
                         onClick={(event) => {
@@ -434,15 +533,22 @@ export default function NovelList() {
                       </Button>
                     ) : workflowTask ? (
                       <Button asChild size="sm">
-                        <Link to={getTaskCenterLink(workflowTask.id)} onClick={stopCardClick}>查看任务</Link>
+                        <Link to={`/novels/${novel.id}/edit?directorTaskId=${workflowTask.id}`} onClick={stopCardClick}>查看推进状态</Link>
                       </Button>
                     ) : null}
 
                     {workflowTask ? (
                       <Button asChild size="sm" variant="outline">
-                        <Link to={getTaskCenterLink(workflowTask.id)} onClick={stopCardClick}>任务中心</Link>
+                        <Link to={`/novels/${novel.id}/edit?directorTaskId=${workflowTask.id}&taskPanel=1`} onClick={stopCardClick}>执行详情</Link>
                       </Button>
                     ) : null}
+
+                    <Button asChild size="sm" variant="outline">
+                      <Link to={`/novels/${novel.id}/preview`} onClick={stopCardClick}>
+                        <BookOpen className="h-4 w-4" aria-hidden="true" />
+                        预览
+                      </Link>
+                    </Button>
 
                     <Button
                       size="sm"
@@ -473,9 +579,81 @@ export default function NovelList() {
                 </CardContent>
               </Card>
             );
-          })}
-        </div>
+            })}
+          </div>
+          {totalPages > 1 ? (
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                disabled={page <= 1 || novelListQuery.isFetching}
+                onClick={() => setPage((current) => Math.max(1, current - 1))}
+              >
+                上一页
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={page >= totalPages || novelListQuery.isFetching}
+                onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
+              >
+                下一页
+              </Button>
+            </div>
+          ) : null}
+        </>
       )}
+
+      <Dialog
+        open={Boolean(cockpitNovelId)}
+        onOpenChange={(open) => {
+          if (!open) {
+            setCockpitNovelId(null);
+          }
+        }}
+      >
+        <AppDialogContent
+          className="max-w-2xl"
+          title="AI 驾驶舱"
+          description={
+            selectedCockpitNovel?.title
+              ? `查看《${selectedCockpitNovel.title}》的 AI 推进状态和下一步动作。`
+              : "查看这本书的 AI 推进状态和下一步动作。"
+          }
+        >
+          {cockpitProjectionQuery.isPending ? (
+            <div className="rounded-lg border p-3 text-sm text-muted-foreground">
+              读取这本书的 AI 状态...
+            </div>
+          ) : cockpitProjectionQuery.isError ? (
+            <div className="rounded-lg border p-3">
+              <div className="text-sm text-muted-foreground">无法读取这本书的 AI 状态，请稍后重试。</div>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="mt-3"
+                onClick={() => void cockpitProjectionQuery.refetch()}
+              >
+                重新读取
+              </Button>
+            </div>
+          ) : cockpitProjection ? (
+            <AICockpit
+              projection={cockpitProjection}
+              mode="focusedNovel"
+              isActionPending={continueWorkflowMutation.isPending}
+              onAction={handleCockpitAction}
+              onOpenNovel={(projection) => {
+                setCockpitNovelId(null);
+                navigate(projection.focusNovel.href);
+              }}
+            />
+          ) : (
+            <AICockpit fallbackSummary="这本书没有需要处理的 AI 自动推进任务。" />
+          )}
+        </AppDialogContent>
+      </Dialog>
     </div>
   );
 }

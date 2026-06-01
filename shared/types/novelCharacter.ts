@@ -12,6 +12,18 @@ export type CharacterCastRole =
 
 export type CharacterGender = "male" | "female" | "other" | "unknown";
 
+export interface CharacterHardFacts {
+  identityLabel?: string | null;
+  factionLabel?: string | null;
+  stanceLabel?: string | null;
+  powerLevel?: string | null;
+  realm?: string | null;
+  currentLocation?: string | null;
+  availability?: string | null;
+  prohibitions?: string[] | null;
+  prohibitionsJson?: string | null;
+}
+
 export interface Character {
   id: string;
   name: string;
@@ -23,6 +35,15 @@ export interface Character {
   personality?: string | null;
   background?: string | null;
   development?: string | null;
+  identityLabel?: string | null;
+  factionLabel?: string | null;
+  stanceLabel?: string | null;
+  powerLevel?: string | null;
+  realm?: string | null;
+  currentLocation?: string | null;
+  availability?: string | null;
+  prohibitions?: string[] | null;
+  prohibitionsJson?: string | null;
   outerGoal?: string | null;
   innerNeed?: string | null;
   fear?: string | null;
@@ -31,6 +52,12 @@ export interface Character {
   secret?: string | null;
   moralLine?: string | null;
   firstImpression?: string | null;
+  appearance?: string | null;
+  physique?: string | null;
+  attireStyle?: string | null;
+  signatureDetail?: string | null;
+  voiceTexture?: string | null;
+  presenceImpression?: string | null;
   arcStart?: string | null;
   arcMidpoint?: string | null;
   arcClimax?: string | null;
@@ -42,6 +69,44 @@ export interface Character {
   baseCharacterId?: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export type CharacterVisibleProfileField =
+  | "appearance"
+  | "physique"
+  | "attireStyle"
+  | "signatureDetail"
+  | "voiceTexture"
+  | "presenceImpression";
+
+export type CharacterVisibleProfileFields = Partial<Record<CharacterVisibleProfileField, string | null>>;
+
+export interface CharacterVisibleProfileSuggestion {
+  characterId: string;
+  characterName: string;
+  fields: CharacterVisibleProfileFields;
+  skippedFields: Partial<Record<CharacterVisibleProfileField, string>>;
+  confidence: number;
+  warnings: string[];
+  hasApplicableChanges: boolean;
+  allowsOverwriteExisting?: boolean;
+}
+
+export interface CharacterVisibleProfileBatchResult {
+  novelId: string;
+  results: CharacterVisibleProfileSuggestion[];
+  skippedCharacters: Array<{
+    characterId: string;
+    characterName: string;
+    reason: string;
+  }>;
+}
+
+export interface CharacterVisibleProfileApplyResult {
+  character: Character;
+  appliedFields: CharacterVisibleProfileField[];
+  skippedFields: Partial<Record<CharacterVisibleProfileField, string>>;
+  warnings: string[];
 }
 
 export interface BaseCharacter {
@@ -94,6 +159,18 @@ export interface CharacterCastOptionMember {
   relationToProtagonist?: string | null;
   storyFunction: string;
   shortDescription?: string | null;
+  personality?: string | null;
+  background?: string | null;
+  development?: string | null;
+  identityLabel?: string | null;
+  factionLabel?: string | null;
+  stanceLabel?: string | null;
+  powerLevel?: string | null;
+  realm?: string | null;
+  currentLocation?: string | null;
+  availability?: string | null;
+  prohibitions?: string[] | null;
+  prohibitionsJson?: string | null;
   outerGoal?: string | null;
   innerNeed?: string | null;
   fear?: string | null;
@@ -122,6 +199,29 @@ export interface CharacterCastOptionRelation {
   updatedAt: string;
 }
 
+export type CharacterCastQualityIssueCode =
+  | "abstract_name"
+  | "english_residue"
+  | "duplicate_story_function"
+  | "missing_protagonist"
+  | "missing_current_identity_anchor"
+  | "missing_hidden_identity_anchor"
+  | "missing_gender";
+
+export interface CharacterCastQualityIssue {
+  code: CharacterCastQualityIssueCode;
+  optionIndex?: number;
+  optionTitle: string;
+  message: string;
+  memberName?: string;
+}
+
+export interface CharacterCastQualityAssessment {
+  autoApplicable: boolean;
+  blockingReasons: string[];
+  issues: CharacterCastQualityIssue[];
+}
+
 export interface CharacterCastOption {
   id: string;
   novelId: string;
@@ -131,6 +231,7 @@ export interface CharacterCastOption {
   recommendedReason?: string | null;
   status: string;
   sourceStoryInput?: string | null;
+  qualityAssessment?: CharacterCastQualityAssessment | null;
   members: CharacterCastOptionMember[];
   relations: CharacterCastOptionRelation[];
   createdAt: string;
@@ -144,6 +245,8 @@ export interface CharacterCastApplyResult {
   relationCount: number;
   characterIds: string[];
   primaryCharacterId?: string | null;
+  qualityOverrideApplied?: boolean;
+  qualityWarnings?: string[];
 }
 
 export interface CharacterCastOptionDeleteResult {
@@ -193,6 +296,15 @@ export interface SupplementalCharacterCandidate {
   personality?: string | null;
   background?: string | null;
   development?: string | null;
+  identityLabel?: string | null;
+  factionLabel?: string | null;
+  stanceLabel?: string | null;
+  powerLevel?: string | null;
+  realm?: string | null;
+  currentLocation?: string | null;
+  availability?: string | null;
+  prohibitions?: string[] | null;
+  prohibitionsJson?: string | null;
   outerGoal?: string | null;
   innerNeed?: string | null;
   fear?: string | null;

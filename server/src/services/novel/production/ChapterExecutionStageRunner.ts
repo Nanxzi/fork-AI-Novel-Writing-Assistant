@@ -46,10 +46,13 @@ export function buildManualChapterControlPolicy(): NovelControlPolicy {
   return buildManualProductionControlPolicy();
 }
 
-export function buildPipelineExecutionControlPolicy(kickoffMode: NovelControlPolicy["kickoffMode"] = "manual_start"): NovelControlPolicy {
+export function buildPipelineExecutionControlPolicy(
+  kickoffMode: NovelControlPolicy["kickoffMode"] = "manual_start",
+  advanceMode: NovelControlPolicy["advanceMode"] = "auto_to_execution",
+): NovelControlPolicy {
   return {
     kickoffMode,
-    advanceMode: "auto_to_execution",
+    advanceMode,
     reviewCheckpoints: ["chapter_batch"],
   };
 }

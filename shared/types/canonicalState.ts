@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { canonicalCharacterResourceSummarySchema } from "./characterResource";
 
 export const canonicalStateRiskLevelSchema = z.enum(["low", "medium", "high"]);
 export const stateChangeProposalStatusSchema = z.enum(["validated", "pending_review", "committed", "rejected"]);
@@ -9,6 +10,7 @@ export const stateChangeProposalTypeSchema = z.enum([
   "information_disclosure",
   "conflict_update",
   "payoff_progression",
+  "character_resource_update",
   "world_rule_change",
   "book_contract_change",
 ]);
@@ -53,6 +55,7 @@ export const canonicalCharacterRuntimeStateSchema = z.object({
   emotion: z.string().nullable().optional(),
   knownFacts: z.array(z.string()).default([]),
   relationStageLabels: z.array(z.string()).default([]),
+  resources: z.array(canonicalCharacterResourceSummarySchema).default([]),
   summary: z.string().nullable().optional(),
   lastEventSummary: z.string().nullable().optional(),
 });
@@ -88,6 +91,23 @@ export const canonicalPayoffStateSchema = z.object({
   confidence: z.number().nullable().optional(),
   createdAt: z.string().nullable().optional(),
   updatedAt: z.string().nullable().optional(),
+});
+
+export const chapterPayoffDirectiveOperationSchema = z.enum([
+  "seed",
+  "touch",
+  "pressure",
+  "partial_reveal",
+  "payoff",
+  "forbid",
+]);
+
+export const chapterPayoffDirectiveSchema = z.object({
+  title: z.string(),
+  ledgerKey: z.string().nullable().optional(),
+  operation: chapterPayoffDirectiveOperationSchema,
+  reason: z.string(),
+  forbiddenReveal: z.string().nullable().optional(),
 });
 
 export const canonicalTimelineEventStateSchema = z.object({
@@ -184,6 +204,7 @@ export const stateGoalSchema = z.object({
   targetConflicts: z.array(z.string()).default([]),
   targetRelationships: z.array(z.string()).default([]),
   targetPayoffs: z.array(z.string()).default([]),
+  targetPayoffDirectives: z.array(chapterPayoffDirectiveSchema).default([]),
   protectedSecrets: z.array(z.string()).default([]),
 });
 
@@ -201,10 +222,10 @@ export const chapterStateGoalSchema = stateGoalSchema.extend({
 
 export const novelControlPolicySchema = z.object({
   kickoffMode: z.enum(["manual_start", "director_start", "takeover_start"]),
-  advanceMode: z.enum(["manual", "stage_review", "auto_to_ready", "auto_to_execution"]),
+  advanceMode: z.enum(["manual", "stage_review", "auto_to_ready", "auto_to_execution", "full_book_autopilot"]),
   reviewCheckpoints: z.array(z.string()).default([]),
   autoExecutionRange: z.object({
-    mode: z.enum(["front10", "volume", "chapter_range"]),
+    mode: z.enum(["book", "volume", "chapter_range"]),
     start: z.number().int().nullable().optional(),
     end: z.number().int().nullable().optional(),
     volumeOrder: z.number().int().nullable().optional(),
@@ -217,6 +238,8 @@ export type CanonicalWorldState = z.infer<typeof canonicalWorldStateSchema>;
 export type CanonicalCharacterRuntimeState = z.infer<typeof canonicalCharacterRuntimeStateSchema>;
 export type CanonicalOpenConflictState = z.infer<typeof canonicalOpenConflictStateSchema>;
 export type CanonicalPayoffState = z.infer<typeof canonicalPayoffStateSchema>;
+export type ChapterPayoffDirectiveOperation = z.infer<typeof chapterPayoffDirectiveOperationSchema>;
+export type ChapterPayoffDirective = z.infer<typeof chapterPayoffDirectiveSchema>;
 export type CanonicalTimelineEventState = z.infer<typeof canonicalTimelineEventStateSchema>;
 export type CanonicalNarrativeState = z.infer<typeof canonicalNarrativeStateSchema>;
 export type StateChangeProposal = z.infer<typeof stateChangeProposalSchema>;

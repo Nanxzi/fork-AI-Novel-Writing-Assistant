@@ -1,8 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
 import {
   BookOpenText,
+  Braces,
   ChevronLeft,
   ChevronRight,
+  CircleHelp,
   Database,
   Globe2,
   House,
@@ -11,6 +14,7 @@ import {
   Route,
   ScanSearch,
   Settings2,
+  ShieldCheck,
   SquarePen,
   Tags,
   UsersRound,
@@ -21,6 +25,7 @@ import {
 import { NavLink } from "react-router-dom";
 import { listKnowledgeDocuments } from "@/api/knowledge";
 import { queryKeys } from "@/api/queryKeys";
+import { getAutoDirectorFollowUpOverview } from "@/api/autoDirectorFollowUps";
 import { getTaskOverview } from "@/api/tasks";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -42,10 +47,12 @@ const navGroups: NavGroup[] = [
     title: "创作",
     items: [
       { to: "/", label: "首页", icon: House },
+      { to: "/help", label: "新手上路", icon: CircleHelp },
       { to: "/novels", label: "小说列表", icon: BookOpenText },
       { to: "/creative-hub", label: "创作中枢", icon: LayoutDashboard },
       { to: "/book-analysis", label: "拆书", icon: ScanSearch },
       { to: "/tasks", label: "任务中心", icon: ListTodo },
+      { to: "/auto-director/follow-ups", label: "导演跟进", icon: Workflow },
     ],
   },
   {
@@ -57,12 +64,14 @@ const navGroups: NavGroup[] = [
       { to: "/knowledge", label: "知识库", icon: Database },
       { to: "/worlds", label: "世界观", icon: Globe2 },
       { to: "/style-engine", label: "写法引擎", icon: WandSparkles },
+      { to: "/anti-ai-rules", label: "反 AI 规则", icon: ShieldCheck },
       { to: "/base-characters", label: "基础角色库", icon: UsersRound },
     ],
   },
   {
     title: "系统",
     items: [
+      { to: "/prompt-workbench", label: "提示词管理", icon: Braces },
       { to: "/settings/model-routes", label: "模型路由", icon: Route },
       { to: "/settings", label: "系统设置", icon: Settings2 },
     ],
@@ -75,9 +84,18 @@ interface SidebarProps {
 }
 
 export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
+  const [badgeQueriesEnabled, setBadgeQueriesEnabled] = useState(false);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setBadgeQueriesEnabled(true), 500);
+    return () => window.clearTimeout(timer);
+  }, []);
+
   const taskQuery = useQuery({
     queryKey: queryKeys.tasks.overview,
     queryFn: getTaskOverview,
+    enabled: badgeQueriesEnabled,
+    staleTime: 30_000,
     refetchInterval: (query) => {
       const overview = query.state.data?.data;
       return (overview?.queuedCount ?? 0) > 0 || (overview?.runningCount ?? 0) > 0 ? 4000 : false;
@@ -87,11 +105,23 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
   const knowledgeQuery = useQuery({
     queryKey: queryKeys.knowledge.documents("sidebar"),
     queryFn: () => listKnowledgeDocuments(),
+    enabled: badgeQueriesEnabled,
     staleTime: 30_000,
+  });
+
+  const autoDirectorFollowUpQuery = useQuery({
+    queryKey: queryKeys.autoDirectorFollowUps.overview,
+    queryFn: getAutoDirectorFollowUpOverview,
+    enabled: badgeQueriesEnabled,
+    refetchInterval: (query) => {
+      const totalCount = query.state.data?.data?.totalCount ?? 0;
+      return totalCount > 0 ? 4000 : false;
+    },
   });
 
   const runningTaskCount = taskQuery.data?.data?.runningCount ?? 0;
   const failedTaskCount = taskQuery.data?.data?.failedCount ?? 0;
+  const autoDirectorFollowUpCount = autoDirectorFollowUpQuery.data?.data?.totalCount ?? 0;
   const knowledgeDocuments = knowledgeQuery.data?.data ?? [];
   const failedIndexCount = knowledgeDocuments.filter((item) => item.latestIndexStatus === "failed").length;
 
@@ -119,6 +149,20 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
             </Badge>
           ) : null}
         </div>
+      );
+    }
+
+    if (to === "/auto-director/follow-ups" && autoDirectorFollowUpCount > 0) {
+      return (
+        <Badge
+          variant="destructive"
+          className={cn(
+            "h-5 px-1.5 text-[10px]",
+            collapsed ? "absolute right-1 top-1 h-4 min-w-4 px-1 text-[9px]" : "ml-auto",
+          )}
+        >
+          {autoDirectorFollowUpCount}
+        </Badge>
       );
     }
 

@@ -15,7 +15,11 @@ import {
   enrichStoryPlan,
   normalizePlanMetadata,
 } from "./plannerPlanMetadata";
-import { persistStoryPlan } from "./plannerPersistence";
+import {
+  buildChapterExecutionContractHash,
+  persistStoryPlan,
+  readPlanExecutionContractHash,
+} from "./plannerPersistence";
 import { invokePlannerLLM, type PlannerLlmOptions } from "./plannerLlm";
 import {
   buildArcPlanContextBlocks,
@@ -23,6 +27,7 @@ import {
   buildChapterPlanContextBlocks,
 } from "./plannerContextBlocks";
 import { buildReplanDecision } from "./replanDecision";
+import { replanWindowDecisionService } from "./ReplanWindowDecisionService";
 import {
   buildCurrentVolumeWindowSummary,
   buildPlannerCharacterDynamicsContext,
@@ -37,7 +42,9 @@ import { resolveChapterPlanParticipants } from "./plannerParticipantResolution";
 
 export { normalizePlannerOutput } from "./plannerOutputNormalization";
 
-interface PlannerOptions extends PlannerLlmOptions {}
+interface PlannerOptions extends PlannerLlmOptions {
+  taskStyleProfileId?: string;
+}
 
 interface ReplanInput extends PlannerOptions {
   chapterId?: string;
@@ -201,7 +208,24 @@ export class PlannerService {
   async ensureChapterPlan(novelId: string, chapterId: string, options: PlannerOptions = {}) {
     const existing = await this.getChapterPlan(novelId, chapterId);
     if (existing && existing.scenes.length > 0) {
-      return existing;
+      const chapter = await prisma.chapter.findFirst({
+        where: { id: chapterId, novelId },
+        select: {
+          expectation: true,
+          targetWordCount: true,
+          conflictLevel: true,
+          revealLevel: true,
+          mustAvoid: true,
+          taskSheet: true,
+          sceneCards: true,
+          hook: true,
+        },
+      });
+      const currentContractHash = chapter ? buildChapterExecutionContractHash(chapter) : null;
+      const plannedContractHash = readPlanExecutionContractHash(existing.rawPlanJson);
+      if (currentContractHash && plannedContractHash === currentContractHash) {
+        return existing;
+      }
     }
     return this.generateChapterPlan(novelId, chapterId, options);
   }
@@ -232,7 +256,7 @@ export class PlannerService {
       throw new Error("小说不存在。");
     }
     const storyModeBlock = buildPlannerStoryModeBlock(novel);
-    const styleEngine = await this.resolvePlannerStyleEngineSummary(novelId);
+    const styleEngine = await this.resolvePlannerStyleEngineSummary(novelId, undefined, options.taskStyleProfileId);
     const contextBlocks = buildBookPlanContextBlocks({
       novelTitle: novel.title,
       description: novel.description,
@@ -302,7 +326,7 @@ export class PlannerService {
       throw new Error("小说不存在。");
     }
     const storyModeBlock = buildPlannerStoryModeBlock(novel);
-    const styleEngine = await this.resolvePlannerStyleEngineSummary(novelId);
+    const styleEngine = await this.resolvePlannerStyleEngineSummary(novelId, undefined, options.taskStyleProfileId);
     const contextBlocks = buildArcPlanContextBlocks({
       novelTitle: novel.title,
       description: novel.description,
@@ -382,8 +406,10 @@ export class PlannerService {
           targetWordCount: true,
           conflictLevel: true,
           revealLevel: true,
+          mustAvoid: true,
           hook: true,
           taskSheet: true,
+          sceneCards: true,
         },
       }),
       prisma.novelBible.findUnique({
@@ -438,7 +464,7 @@ export class PlannerService {
       prisma.storyMacroPlan.findUnique({
         where: { novelId },
       }),
-      this.resolvePlannerStyleEngineSummary(novelId, chapterId),
+      this.resolvePlannerStyleEngineSummary(novelId, chapterId, options.taskStyleProfileId),
       prisma.stateChangeProposal.count({
         where: {
           novelId,
@@ -671,12 +697,21 @@ export class PlannerService {
         ...resolvedStateDrivenContext.protectedSecrets.map((item) => `禁止提前泄露：${item}`),
       ], 8),
       hookTarget: output.hookTarget || chapter.hook?.trim() || null,
+      baseExecutionContract: {
+        expectation: chapter.expectation,
+        targetWordCount: chapter.targetWordCount,
+        conflictLevel: chapter.conflictLevel,
+        revealLevel: chapter.revealLevel,
+        mustAvoid: chapter.mustAvoid,
+        taskSheet: chapter.taskSheet,
+        sceneCards: chapter.sceneCards,
+        hook: chapter.hook,
+      },
       scenes: output.scenes ?? [],
       planRole: metadata.planRole,
       phaseLabel: metadata.phaseLabel,
       mustAdvance: takeUnique([
         ...(chapterStateGoal?.targetConflicts ?? []),
-        ...(chapterStateGoal?.targetPayoffs ?? []),
         ...metadata.mustAdvance,
       ], 8),
       mustPreserve: takeUnique([
@@ -779,8 +814,9 @@ export class PlannerService {
       createdAt: report.createdAt.toISOString(),
       updatedAt: report.updatedAt.toISOString(),
     }));
-    const replanDecision = buildReplanDecision({
-      requestedWindowSize: input.windowSize,
+    const requestedWindowSize = input.windowSize ?? 3;
+    const replanDecision = await replanWindowDecisionService.decide({
+      requestedWindowSize,
       availableChapterOrders: allChapters.map((item) => item.order),
       targetChapterOrder: targetChapter.order,
       triggerType: input.triggerType ?? "manual",
@@ -792,7 +828,9 @@ export class PlannerService {
       nextAction: resolvedStateDrivenContext.nextAction,
       chapterStateGoal: resolvedStateDrivenContext.chapterStateGoal,
       protectedSecrets: resolvedStateDrivenContext.protectedSecrets,
-      forceRecommended: true,
+      provider: input.provider,
+      model: input.model,
+      temperature: input.temperature,
     });
     const affectedChapterOrderSet = new Set(replanDecision.affectedChapterOrders);
     const affectedChapters = allChapters.filter((item) => affectedChapterOrderSet.has(item.order));
@@ -816,7 +854,9 @@ export class PlannerService {
           triggerReason: replanDecision.triggerReason,
           windowReason: replanDecision.windowReason,
           whyTheseChapters: replanDecision.whyTheseChapters,
-          sourceIssueIds: input.sourceIssueIds ?? [],
+          sourceIssueIds: replanDecision.blockingIssueIds.length > 0
+            ? replanDecision.blockingIssueIds
+            : input.sourceIssueIds ?? [],
           windowIndex: index,
           windowSize: affectedChapters.length,
           affectedChapterOrders: affectedOrders,
@@ -836,7 +876,9 @@ export class PlannerService {
       affectedChapterIds: affectedChapters.map((item) => item.id),
       affectedChapterOrders: affectedOrders,
       generatedPlanIds: generatedPlans.map((plan) => plan.id),
-      sourceIssueIds: input.sourceIssueIds ?? [],
+      sourceIssueIds: replanDecision.blockingIssueIds.length > 0
+        ? replanDecision.blockingIssueIds
+        : input.sourceIssueIds ?? [],
       triggerType: input.triggerType ?? "manual",
       reason: input.reason,
       triggerReason: replanDecision.triggerReason,
@@ -845,6 +887,8 @@ export class PlannerService {
       anchorChapterOrder: replanDecision.anchorChapterOrder,
       windowSize: affectedChapters.length,
       blockingLedgerKeys: replanDecision.blockingLedgerKeys,
+      repairIntent: replanDecision.repairIntent,
+      confidence: replanDecision.confidence,
     };
 
     const run = await prisma.replanRun.create({
@@ -893,6 +937,9 @@ export class PlannerService {
     targetChapterOrder?: number | null;
     requestedWindowSize?: number | null;
     blockingLedgerKeys?: string[];
+    forceRecommended?: boolean;
+    reason?: string | null;
+    triggerType?: string | null;
   }) {
     return buildReplanDecision({
       auditReports: input.auditReports ?? [],
@@ -904,12 +951,23 @@ export class PlannerService {
       targetChapterOrder: input.targetChapterOrder ?? input.contextPackage?.chapter?.order ?? null,
       requestedWindowSize: input.requestedWindowSize ?? null,
       blockingLedgerKeys: input.blockingLedgerKeys ?? [],
+      forceRecommended: input.forceRecommended,
+      reason: input.reason,
+      triggerType: input.triggerType,
     });
   }
 
-  private async resolvePlannerStyleEngineSummary(novelId: string, chapterId?: string): Promise<string> {
+  private async resolvePlannerStyleEngineSummary(
+    novelId: string,
+    chapterId?: string,
+    taskStyleProfileId?: string,
+  ): Promise<string> {
     try {
-      const styleContext = await this.styleBindingService.resolveForGeneration({ novelId, chapterId });
+      const styleContext = await this.styleBindingService.resolveForGeneration({
+        novelId,
+        chapterId,
+        taskStyleProfileId,
+      });
       return buildPlannerStyleEngineSummary(styleContext);
     } catch {
       return "无";

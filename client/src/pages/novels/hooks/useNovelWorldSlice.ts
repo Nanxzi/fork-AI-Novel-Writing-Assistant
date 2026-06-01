@@ -11,6 +11,7 @@ import {
 
 interface UseNovelWorldSliceOptions {
   novelId: string;
+  enabled?: boolean;
   llm: {
     provider: LLMProvider;
     model: string;
@@ -19,13 +20,13 @@ interface UseNovelWorldSliceOptions {
   queryClient: QueryClient;
 }
 
-export function useNovelWorldSlice({ novelId, llm, queryClient }: UseNovelWorldSliceOptions) {
+export function useNovelWorldSlice({ novelId, enabled = true, llm, queryClient }: UseNovelWorldSliceOptions) {
   const [worldSliceMessage, setWorldSliceMessage] = useState("");
 
   const worldSliceQuery = useQuery({
     queryKey: queryKeys.novels.worldSlice(novelId),
     queryFn: () => getNovelWorldSlice(novelId),
-    enabled: Boolean(novelId),
+    enabled: Boolean(novelId && enabled),
   });
 
   const refreshWorldSliceMutation = useMutation({

@@ -1,15 +1,19 @@
 import "dotenv/config";
+import type { Server } from "node:http";
 import os from "node:os";
 import cors from "cors";
 import express from "express";
 import helmet from "helmet";
 import morgan from "morgan";
 import type { ApiResponse } from "@ai-novel/shared/types/api";
+import { ensureRuntimeDatabaseReady } from "./db/runtimeMigrations";
 import { errorHandler } from "./middleware/errorHandler";
 import { loadProviderApiKeys } from "./llm/factory";
 import astrologyRouter from "./routes/astrology";
 import agentCatalogRouter from "./routes/agentCatalog";
 import agentRunsRouter from "./routes/agentRuns";
+import autoDirectorChannelCallbacksRouter from "./routes/autoDirectorChannelCallbacks";
+import autoDirectorFollowUpsRouter from "./routes/autoDirectorFollowUps";
 import bookAnalysisRouter from "./routes/bookAnalysis";
 import characterRouter from "./routes/character";
 import chatRouter from "./routes/chat";
@@ -19,31 +23,36 @@ import healthRouter from "./routes/health";
 import imagesRouter from "./routes/images";
 import knowledgeRouter from "./routes/knowledge";
 import llmRouter from "./routes/llm";
-import novelRouter from "./routes/novel";
-import novelDirectorRouter from "./routes/novelDirector";
-import novelDecisionsRouter from "./routes/novelDecisions";
-import novelChapterSummaryRouter from "./routes/novelChapterSummary";
-import novelExportRouter from "./routes/novelExport";
-import novelWorkflowsRouter from "./routes/novelWorkflows";
+import novelRouter from "./modules/novel/http/novel";
+import novelDirectorRouter from "./services/novel/director/http/novelDirector";
+import novelExportRouter from "./modules/export/http/novelExport";
+import novelWorkflowsRouter from "./services/novel/director/http/novelWorkflows";
+import promptWorkbenchRouter from "./routes/promptWorkbench";
 import ragRouter from "./routes/rag";
+import settingsAutoDirectorRouter from "./routes/settingsAutoDirector";
 import settingsRouter from "./routes/settings";
 import styleEngineRouter from "./routes/styleEngine";
 import styleEngineExtractionRouter from "./routes/styleEngineExtraction";
 import storyModeRouter from "./routes/storyMode";
 import tasksRouter from "./routes/tasks";
 import titleLibraryRouter from "./routes/titleLibrary";
-import worldRouter from "./routes/world";
+import worldRouter from "./modules/setup/world/http";
 import writingFormulaRouter from "./routes/writingFormula";
 import { novelEventBus, registerNovelEventHandlers } from "./events";
 import { bookAnalysisService } from "./services/bookAnalysis/BookAnalysisService";
 import { ragServices } from "./services/rag";
+import { getSharedNovelServices } from "./services/novel/application/sharedNovelServices";
+import { novelSideEffectWorker } from "./events/sideEffects";
 import { NovelPipelineRuntimeService } from "./services/novel/NovelPipelineRuntimeService";
 import { recoveryTaskService } from "./services/task/RecoveryTaskService";
 import {
   ensureSystemResourceStarterData,
   hasSystemResourceBootstrapChanges,
 } from "./services/bootstrap/SystemResourceBootstrapService";
+import { initializeRagSettingsCompatibility } from "./services/settings/RagCompatibilityBootstrapService";
+import { DirectorWorker } from "./workers/directorWorker";
 
+getSharedNovelServices();
 registerNovelEventHandlers(novelEventBus);
 const novelPipelineRuntimeService = new NovelPipelineRuntimeService();
 
@@ -63,6 +72,7 @@ function parseEnvFlag(value: string | undefined, defaultValue: boolean): boolean
 }
 
 export function createApp() {
+  getSharedNovelServices();
   const app = express();
   const jsonBodyLimit = process.env.API_JSON_LIMIT ?? "20mb";
   const corsOriginEnv = process.env.CORS_ORIGIN;
@@ -116,8 +126,6 @@ export function createApp() {
   app.use("/api/novels", novelRouter);
   app.use("/api/novels/director", novelDirectorRouter);
   app.use("/api/novel-workflows", novelWorkflowsRouter);
-  app.use("/api/novels", novelDecisionsRouter);
-  app.use("/api/novels", novelChapterSummaryRouter);
   app.use("/api/novels", novelExportRouter);
   app.use("/api/worlds", worldRouter);
   app.use("/api/rag", ragRouter);
@@ -125,8 +133,12 @@ export function createApp() {
   app.use("/api/writing-formula", writingFormulaRouter);
   app.use("/api/chat", chatRouter);
   app.use("/api/creative-hub", creativeHubRouter);
+  app.use("/api/prompt-workbench", promptWorkbenchRouter);
   app.use("/api/images", imagesRouter);
   app.use("/api/tasks", tasksRouter);
+  app.use("/api/auto-director/follow-ups", autoDirectorFollowUpsRouter);
+  app.use("/api/settings/auto-director", settingsAutoDirectorRouter);
+  app.use("/api/auto-director/channel-callbacks", autoDirectorChannelCallbacksRouter);
   app.use("/api/settings", settingsRouter);
   app.use("/api/astrology", astrologyRouter);
 
@@ -156,48 +168,147 @@ function getLanIp(): string | null {
   return null;
 }
 
-async function bootstrap(): Promise<void> {
-  const app = createApp();
-  const port = Number(process.env.PORT ?? 3000);
-  const allowLan = parseEnvFlag(process.env.ALLOW_LAN, process.env.NODE_ENV !== "production");
-  const host = process.env.HOST ?? (allowLan ? "0.0.0.0" : "localhost");
+function createServerUrl(host: string, port: number): string {
+  if (host === "0.0.0.0" || host === "::") {
+    return `http://localhost:${port}`;
+  }
+  return host.includes(":") ? `http://[${host}]:${port}` : `http://${host}:${port}`;
+}
+
+export interface ServerStartOptions {
+  host?: string;
+  port?: number;
+  allowLan?: boolean;
+}
+
+export interface StartedServer {
+  app: express.Express;
+  server: Server;
+  host: string;
+  port: number;
+  allowLan: boolean;
+  url: string;
+  close: () => Promise<void>;
+}
+
+interface BackgroundServicesHandle {
+  stop: () => Promise<void>;
+}
+
+function resolveServerStartOptions(options?: ServerStartOptions): {
+  host: string;
+  port: number;
+  allowLan: boolean;
+} {
+  const allowLan = options?.allowLan ?? parseEnvFlag(process.env.ALLOW_LAN, process.env.NODE_ENV !== "production");
+  return {
+    allowLan,
+    port: options?.port ?? Number(process.env.PORT ?? 3000),
+    host: options?.host ?? process.env.HOST ?? (allowLan ? "0.0.0.0" : "localhost"),
+  };
+}
+
+function logServerReady(host: string, port: number): void {
+  console.log(`[server] listening on http://localhost:${port}`);
+  if (host === "0.0.0.0" || host === "::") {
+    const lanIp = getLanIp();
+    if (lanIp) {
+      console.log(`[server] LAN: http://${lanIp}:${port}`);
+    }
+  }
+}
+
+function initializeBackgroundServices(): BackgroundServicesHandle {
   ragServices.ragWorker.start();
+  novelSideEffectWorker.start();
+  const directorWorker = new DirectorWorker();
+  void directorWorker.start().catch((error) => {
+    console.error("[director.worker] unexpected stop", error);
+  });
   const recoveryInitialization = recoveryTaskService.initializePendingRecoveries();
 
-  app.listen(port, host, () => {
-    console.log(`[server] listening on http://localhost:${port}`);
-    if (host === "0.0.0.0" || host === "::") {
-      const lanIp = getLanIp();
-      if (lanIp) {
-        console.log(`[server] LAN: http://${lanIp}:${port}`);
-      }
-    }
+  void loadProviderApiKeys().catch((error) => {
+    console.warn("数据库中的模型密钥加载失败，已回退到环境变量。", error);
+  });
 
-    void loadProviderApiKeys().catch((error) => {
-      console.warn("数据库中的模型密钥加载失败，已回退到环境变量。", error);
+  void ensureSystemResourceStarterData()
+    .then((systemResourceReport) => {
+      if (hasSystemResourceBootstrapChanges(systemResourceReport)) {
+        console.log("[server] built-in creative resources bootstrapped.", systemResourceReport);
+      }
+    })
+    .catch((error) => {
+      console.warn("Failed to bootstrap built-in creative resources.", error);
     });
 
-    void ensureSystemResourceStarterData()
-      .then((systemResourceReport) => {
-        if (hasSystemResourceBootstrapChanges(systemResourceReport)) {
-          console.log("[server] built-in creative resources bootstrapped.", systemResourceReport);
-        }
-      })
-      .catch((error) => {
-        console.warn("Failed to bootstrap built-in creative resources.", error);
-      });
+  void recoveryInitialization
+    .then(() => {
+      bookAnalysisService.startWatchdog();
+      novelPipelineRuntimeService.startWatchdog();
+    })
+    .catch((error) => {
+      console.warn("Failed to prepare pending recovery candidates.", error);
+      bookAnalysisService.startWatchdog();
+      novelPipelineRuntimeService.startWatchdog();
+    });
 
-    void recoveryInitialization
-      .then(() => {
-        bookAnalysisService.startWatchdog();
-        novelPipelineRuntimeService.startWatchdog();
-      })
-      .catch((error) => {
-        console.warn("Failed to prepare pending recovery candidates.", error);
-        bookAnalysisService.startWatchdog();
-        novelPipelineRuntimeService.startWatchdog();
-      });
+  return {
+    stop: async () => {
+      directorWorker.stop();
+      novelSideEffectWorker.stop();
+      ragServices.ragWorker.stop();
+      bookAnalysisService.stopWatchdog();
+      novelPipelineRuntimeService.stopWatchdog();
+    },
+  };
+}
+
+export async function startServer(options?: ServerStartOptions): Promise<StartedServer> {
+  await ensureRuntimeDatabaseReady();
+
+  const ragCompatibilityReport = await initializeRagSettingsCompatibility();
+  if (
+    ragCompatibilityReport.importedSettingKeys.length > 0
+    || ragCompatibilityReport.importedProviderRecords.length > 0
+  ) {
+    console.log("[server] imported legacy RAG env settings.", ragCompatibilityReport);
+  }
+
+  const app = createApp();
+  const { host, port, allowLan } = resolveServerStartOptions(options);
+
+  const server = await new Promise<Server>((resolve, reject) => {
+    const listeningServer = app.listen(port, host, () => resolve(listeningServer));
+    listeningServer.once("error", reject);
   });
+  const backgroundServices = initializeBackgroundServices();
+
+  logServerReady(host, port);
+
+  return {
+    app,
+    server,
+    host,
+    port,
+    allowLan,
+    url: createServerUrl(host, port),
+    close: async () => {
+      await backgroundServices.stop();
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    },
+  };
+}
+
+async function bootstrap(): Promise<void> {
+  await startServer();
 }
 
 if (require.main === module) {

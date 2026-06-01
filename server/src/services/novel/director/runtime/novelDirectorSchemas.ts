@@ -1,0 +1,175 @@
+import { z } from "zod";
+import {
+  DIRECTOR_MAX_TARGET_CHAPTER_COUNT,
+  DIRECTOR_MIN_TARGET_CHAPTER_COUNT,
+} from "@ai-novel/shared/types/novelDirector";
+
+const nonEmptyString = z.string().trim().min(1);
+
+const TITLE_STYLE_VALUES = ["literary", "conflict", "suspense", "high_concept"] as const;
+export type DirectorTitleSuggestionStyle = (typeof TITLE_STYLE_VALUES)[number];
+
+/**
+ * 将模型或 JSON 修复层可能输出的变体（大小写、连字符、少量中文标签）归一成合法枚举。
+ * 无法识别时退回 literary，避免整段工作流因单一枚举失败而中断。
+ */
+export function normalizeDirectorTitleSuggestionStyle(raw: unknown): DirectorTitleSuggestionStyle {
+  if (raw === null || raw === undefined) {
+    return "literary";
+  }
+  const normalized = String(raw)
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_")
+    .replace(/_+/g, "_");
+
+  if (normalized.length === 0) {
+    return "literary";
+  }
+
+  const zhToStyle: Record<string, DirectorTitleSuggestionStyle> = {
+    文学: "literary",
+    文艺: "literary",
+    冲突: "conflict",
+    对抗: "conflict",
+    悬念: "suspense",
+    悬疑: "suspense",
+    高概念: "high_concept",
+  };
+  const fromZh = zhToStyle[normalized];
+  if (fromZh) {
+    return fromZh;
+  }
+
+  if ((TITLE_STYLE_VALUES as readonly string[]).includes(normalized)) {
+    return normalized as DirectorTitleSuggestionStyle;
+  }
+
+  return "literary";
+}
+
+const titleStyleSchema = z.preprocess(
+  normalizeDirectorTitleSuggestionStyle,
+  z.enum(TITLE_STYLE_VALUES),
+);
+
+const keywordArraySchema = z.union([
+  z.array(nonEmptyString),
+  nonEmptyString,
+]).transform((value) => {
+  const list = Array.isArray(value)
+    ? value
+    : value.split(/[,，、/|]/g).map((item) => item.trim()).filter(Boolean);
+  return Array.from(new Set(list)).slice(0, 4);
+}).pipe(z.array(nonEmptyString).min(2).max(4));
+
+const chapterCountSchema = z.preprocess((value) => {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.max(
+      DIRECTOR_MIN_TARGET_CHAPTER_COUNT,
+      Math.min(DIRECTOR_MAX_TARGET_CHAPTER_COUNT, Math.round(value)),
+    );
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed && /^-?\d+(\.\d+)?$/.test(trimmed)) {
+      const parsed = Number(trimmed);
+      if (Number.isFinite(parsed)) {
+        return Math.max(
+          DIRECTOR_MIN_TARGET_CHAPTER_COUNT,
+          Math.min(DIRECTOR_MAX_TARGET_CHAPTER_COUNT, Math.round(parsed)),
+        );
+      }
+    }
+  }
+  return value;
+}, z.number().int().min(DIRECTOR_MIN_TARGET_CHAPTER_COUNT).max(DIRECTOR_MAX_TARGET_CHAPTER_COUNT));
+
+export const directorCandidateSchema = z.object({
+  id: nonEmptyString.optional(),
+  workingTitle: nonEmptyString,
+  titleOptions: z.array(z.object({
+    title: nonEmptyString,
+    clickRate: z.coerce.number().int().min(35).max(99),
+    style: titleStyleSchema,
+    angle: z.string().trim().max(20).nullable().optional(),
+    reason: z.string().trim().max(72).nullable().optional(),
+  })).max(4).optional().default([]),
+  logline: nonEmptyString,
+  positioning: nonEmptyString,
+  sellingPoint: nonEmptyString,
+  coreConflict: nonEmptyString,
+  protagonistPath: nonEmptyString,
+  endingDirection: nonEmptyString,
+  hookStrategy: nonEmptyString,
+  progressionLoop: nonEmptyString,
+  whyItFits: nonEmptyString,
+  toneKeywords: keywordArraySchema,
+  targetChapterCount: chapterCountSchema,
+});
+
+export const directorPersistedCandidateSchema = directorCandidateSchema.extend({
+  id: nonEmptyString,
+});
+
+export const directorCandidateResponseSchema = z.object({
+  candidates: z.array(directorCandidateSchema).length(2),
+});
+
+export const directorBookContractSchema = z.object({
+  readingPromise: nonEmptyString,
+  protagonistFantasy: nonEmptyString,
+  coreSellingPoint: nonEmptyString,
+  chapter3Payoff: nonEmptyString,
+  chapter10Payoff: nonEmptyString,
+  chapter30Payoff: nonEmptyString,
+  escalationLadder: nonEmptyString,
+  relationshipMainline: nonEmptyString,
+  // Raw structured output tolerates overflow here so model-specific variance
+  // can be normalized into the product-facing 6-item cap after parsing.
+  absoluteRedLines: z.array(nonEmptyString).min(2),
+});
+
+export const directorPlanBlueprintSchema = z.object({
+  bookPlan: z.object({
+    title: nonEmptyString,
+    objective: nonEmptyString,
+    hookTarget: z.string().trim().optional().default(""),
+    participants: z.array(nonEmptyString).max(8).default([]),
+    reveals: z.array(nonEmptyString).max(8).default([]),
+    riskNotes: z.array(nonEmptyString).max(8).default([]),
+  }),
+  arcs: z.array(z.object({
+    title: nonEmptyString,
+    objective: nonEmptyString,
+    summary: nonEmptyString,
+    phaseLabel: nonEmptyString,
+    hookTarget: z.string().trim().optional().default(""),
+    participants: z.array(nonEmptyString).max(8).default([]),
+    reveals: z.array(nonEmptyString).max(8).default([]),
+    riskNotes: z.array(nonEmptyString).max(8).default([]),
+    chapters: z.array(z.object({
+      title: nonEmptyString,
+      objective: nonEmptyString,
+      expectation: nonEmptyString,
+      planRole: z.enum(["setup", "progress", "pressure", "turn", "payoff", "cooldown"]),
+      hookTarget: z.string().trim().optional().default(""),
+      participants: z.array(nonEmptyString).max(8).default([]),
+      reveals: z.array(nonEmptyString).max(8).default([]),
+      riskNotes: z.array(nonEmptyString).max(8).default([]),
+      mustAdvance: z.array(nonEmptyString).max(8).default([]),
+      mustPreserve: z.array(nonEmptyString).max(8).default([]),
+      scenes: z.array(z.object({
+        title: nonEmptyString,
+        objective: nonEmptyString,
+        conflict: z.string().trim().optional().default(""),
+        reveal: z.string().trim().optional().default(""),
+        emotionBeat: z.string().trim().optional().default(""),
+      })).max(6).default([]),
+    })).min(2).max(20),
+  })).min(2).max(6),
+});
+
+export type DirectorCandidateResponse = z.infer<typeof directorCandidateResponseSchema>;
+export type DirectorBookContractParsed = z.infer<typeof directorBookContractSchema>;
+export type DirectorPlanBlueprintParsed = z.infer<typeof directorPlanBlueprintSchema>;

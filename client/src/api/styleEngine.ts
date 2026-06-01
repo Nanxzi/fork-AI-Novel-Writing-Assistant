@@ -1,9 +1,13 @@
 import type { ApiResponse } from "@ai-novel/shared/types/api";
 import type {
+  AntiAiEffectiveRulesResult,
   AntiAiRule,
+  AntiAiRuleAiDraftRequest,
+  AntiAiRuleAiDraftResult,
   StyleBinding,
   StyleDetectionReport,
   StyleExtractionDraft,
+  StyleExtractionSourceProcessingMode,
   StyleFeatureDecision,
   StyleProfileFeature,
   StyleProfile,
@@ -11,6 +15,7 @@ import type {
   StyleTemplate,
 } from "@ai-novel/shared/types/styleEngine";
 import type { CompiledStylePromptBlocks } from "@ai-novel/shared/types/styleEngine";
+import type { UnifiedTaskDetail } from "@ai-novel/shared/types/task";
 import { apiClient } from "./client";
 
 export async function getStyleProfiles() {
@@ -90,6 +95,36 @@ export async function extractStyleFeaturesFromText(payload: {
   return data;
 }
 
+export async function createStyleExtractionTaskFromText(payload: {
+  name: string;
+  sourceText: string;
+  category?: string;
+  provider?: string;
+  model?: string;
+  temperature?: number;
+  presetKey?: "imitate" | "balanced" | "transfer";
+}) {
+  const { data } = await apiClient.post<ApiResponse<UnifiedTaskDetail>>("/style-extraction-tasks/from-text", payload);
+  return data;
+}
+
+export async function createStyleExtractionTaskFromKnowledgeDocument(payload: {
+  documentId: string;
+  name: string;
+  category?: string;
+  provider?: string;
+  model?: string;
+  temperature?: number;
+  presetKey?: "imitate" | "balanced" | "transfer";
+  sourceProcessingMode?: StyleExtractionSourceProcessingMode;
+}) {
+  const { data } = await apiClient.post<ApiResponse<UnifiedTaskDetail>>(
+    "/style-extraction-tasks/from-knowledge-document",
+    payload,
+  );
+  return data;
+}
+
 export async function createStyleProfileFromExtraction(payload: {
   name: string;
   sourceText: string;
@@ -162,6 +197,23 @@ export async function getAntiAiRules() {
   return data;
 }
 
+export async function createAntiAiRule(payload: {
+  key: string;
+  name: string;
+  type: AntiAiRule["type"];
+  severity: AntiAiRule["severity"];
+  description: string;
+  detectPatterns?: string[];
+  rewriteSuggestion?: string;
+  promptInstruction?: string;
+  autoRewrite?: boolean;
+  enabled?: boolean;
+  globalBaselineEnabled?: boolean;
+}) {
+  const { data } = await apiClient.post<ApiResponse<AntiAiRule>>("/anti-ai-rules", payload);
+  return data;
+}
+
 export async function updateAntiAiRule(id: string, payload: Partial<{
   key: string;
   name: string;
@@ -173,8 +225,28 @@ export async function updateAntiAiRule(id: string, payload: Partial<{
   promptInstruction: string;
   autoRewrite: boolean;
   enabled: boolean;
+  globalBaselineEnabled: boolean;
 }>) {
   const { data } = await apiClient.put<ApiResponse<AntiAiRule>>(`/anti-ai-rules/${id}`, payload);
+  return data;
+}
+
+export async function getEffectiveAntiAiRules(params?: {
+  novelId?: string;
+  chapterId?: string;
+  styleProfileId?: string;
+  taskStyleProfileId?: string;
+}) {
+  const { data } = await apiClient.get<ApiResponse<AntiAiEffectiveRulesResult>>("/anti-ai-rules/effective", { params });
+  return data;
+}
+
+export async function generateAntiAiRuleDraft(payload: AntiAiRuleAiDraftRequest & {
+  provider?: string;
+  model?: string;
+  temperature?: number;
+}) {
+  const { data } = await apiClient.post<ApiResponse<AntiAiRuleAiDraftResult>>("/anti-ai-rules/ai-draft", payload);
   return data;
 }
 
@@ -225,6 +297,7 @@ export async function detectStyleIssues(payload: {
   novelId?: string;
   chapterId?: string;
   taskStyleProfileId?: string;
+  previewAntiAiRuleIds?: string[];
   provider?: string;
   model?: string;
   temperature?: number;
@@ -239,6 +312,7 @@ export async function rewriteStyleIssues(payload: {
   novelId?: string;
   chapterId?: string;
   taskStyleProfileId?: string;
+  previewAntiAiRuleIds?: string[];
   issues: Array<{
     ruleName: string;
     excerpt: string;

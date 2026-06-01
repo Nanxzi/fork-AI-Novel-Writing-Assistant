@@ -1,14 +1,31 @@
-import { useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { bootstrapNovelWorkflow } from "@/api/novelWorkflow";
 import { normalizeNovelWorkspaceTab } from "../novelWorkspaceNavigation";
+import {
+  readNovelEditWorkflowTaskIds,
+  withNovelEditDirectorTaskId,
+  withNovelEditWorkspaceTaskId,
+} from "./novelEditWorkflowParams";
 
 export function useNovelEditWorkflow(novelId: string) {
   const [searchParams, setSearchParams] = useSearchParams();
 
-  const workflowTaskId = searchParams.get("taskId") ?? "";
+  const { directorTaskId, workspaceTaskId: workflowTaskId } = readNovelEditWorkflowTaskIds(searchParams);
   const selectedVolumeId = searchParams.get("volumeId") ?? "";
+  const taskPanelOpen = searchParams.get("taskPanel") === "1";
+
+  useEffect(() => {
+    const canonicalDirectorTaskId = searchParams.get("directorTaskId")?.trim() ?? "";
+    const legacyDirectorTaskId = searchParams.get("taskId")?.trim() ?? "";
+    if (!legacyDirectorTaskId) {
+      return;
+    }
+    setSearchParams((prev) => withNovelEditDirectorTaskId(prev, canonicalDirectorTaskId || legacyDirectorTaskId), {
+      replace: true,
+    });
+  }, [searchParams, setSearchParams]);
 
   const bootstrapMutation = useMutation({
     mutationFn: () => bootstrapNovelWorkflow({
@@ -26,8 +43,7 @@ export function useNovelEditWorkflow(novelId: string) {
         return;
       }
       setSearchParams((prev) => {
-        const next = new URLSearchParams(prev);
-        next.set("taskId", nextTaskId);
+        const next = withNovelEditWorkspaceTaskId(prev, nextTaskId);
         if (!next.get("stage")) {
           next.set("stage", normalizeNovelWorkspaceTab(searchParams.get("stage")));
         }
@@ -85,13 +101,31 @@ export function useNovelEditWorkflow(novelId: string) {
     }, { replace: true });
   };
 
+  const setDirectorTaskId = useCallback((value: string) => {
+    setSearchParams((prev) => {
+      return withNovelEditDirectorTaskId(prev, value);
+    }, { replace: true });
+  }, [setSearchParams]);
+
+  const clearTaskPanelOpen = useCallback(() => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.delete("taskPanel");
+      return next;
+    }, { replace: true });
+  }, [setSearchParams]);
+
   return {
     activeTab,
     setActiveTab,
+    directorTaskId,
+    setDirectorTaskId,
     selectedChapterId,
     setSelectedChapterId,
     selectedVolumeId,
     setSelectedVolumeId,
     workflowTaskId,
+    taskPanelOpen,
+    clearTaskPanelOpen,
   };
 }

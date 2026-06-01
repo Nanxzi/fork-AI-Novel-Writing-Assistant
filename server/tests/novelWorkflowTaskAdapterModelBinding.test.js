@@ -70,6 +70,156 @@ test("task detail exposes candidate-stage bound model before directorInput exist
   }
 });
 
+test("task detail compact mode strips heavyweight auto-director seed payload from polling responses", async () => {
+  const originals = {
+    findUnique: prisma.novelWorkflowTask.findUnique,
+  };
+
+  prisma.novelWorkflowTask.findUnique = async () => ({
+    id: "task_compact_auto_director",
+    title: "AI 自动导演",
+    lane: "auto_director",
+    status: "running",
+    progress: 0.76,
+    currentStage: "章节执行",
+    currentItemKey: "chapter_execution_node",
+    currentItemLabel: "等待确认章节执行",
+    checkpointType: "chapter_batch_ready",
+    checkpointSummary: "该动作可能覆盖用户手写内容，需要确认后继续。",
+    resumeTargetJson: JSON.stringify({
+      stage: "chapter",
+      chapterId: "chapter-1",
+      volumeId: "volume-1",
+    }),
+    attemptCount: 1,
+    maxAttempts: 3,
+    lastError: null,
+    createdAt: new Date("2026-04-09T09:00:00.000Z"),
+    updatedAt: new Date("2026-04-09T09:05:00.000Z"),
+    heartbeatAt: new Date("2026-04-09T09:05:00.000Z"),
+    promptTokens: 1200,
+    completionTokens: 600,
+    totalTokens: 1800,
+    llmCallCount: 2,
+    lastTokenRecordedAt: new Date("2026-04-09T09:05:00.000Z"),
+    novelId: "novel-1",
+    novel: { title: "测试小说" },
+    startedAt: new Date("2026-04-09T09:00:00.000Z"),
+    finishedAt: null,
+    cancelRequestedAt: null,
+    milestonesJson: JSON.stringify([{
+      checkpointType: "chapter_batch_ready",
+      summary: "章节批次待确认",
+      createdAt: "2026-04-09T09:05:00.000Z",
+    }]),
+    seedPayloadJson: JSON.stringify({
+      idea: "这段只用于创建弹窗恢复，不应该进入运行态轮询。",
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+      runMode: "auto_to_execution",
+      batches: [{
+        id: "batch-heavy",
+        candidates: [{ title: "大段方案", content: "x".repeat(200_000) }],
+      }],
+      directorSession: {
+        phase: "chapter_execution",
+        reviewScope: "chapter",
+        heavyweightRuntimeSnapshot: "x".repeat(200_000),
+      },
+      autoExecution: {
+        scopeLabel: "前 3 章",
+        totalChapterCount: 3,
+        heavyweightChapterDrafts: "x".repeat(200_000),
+      },
+      styleIntentSummary: {
+        headline: "高压爽文",
+        styleProfileName: "爽感强",
+        stageSummaryLines: ["节奏快", "冲突强"],
+        heavyweightPrompt: "x".repeat(200_000),
+      },
+      takeover: {
+        downstreamReset: {
+          resetStatus: "not_started",
+          resetSteps: ["chapter"],
+          heavyweightSnapshot: "x".repeat(200_000),
+        },
+      },
+    }),
+  });
+
+  const adapter = new NovelWorkflowTaskAdapter();
+  const originalHeal = adapter.workflowService.healAutoDirectorTaskState;
+  adapter.workflowService.healAutoDirectorTaskState = async () => false;
+
+  try {
+    const detail = await adapter.detail("task_compact_auto_director", { seedPayloadMode: "compact" });
+    assert.ok(detail);
+    assert.equal(detail.provider, "deepseek");
+    assert.equal(detail.model, "deepseek-v4-flash");
+    assert.equal(detail.meta.seedPayload.idea, undefined);
+    assert.equal(detail.meta.seedPayload.batches, undefined);
+    assert.equal(detail.meta.seedPayload.autoExecution.scopeLabel, "前 3 章");
+    assert.equal(detail.meta.seedPayload.autoExecution.heavyweightChapterDrafts, undefined);
+    assert.equal(detail.meta.directorSession.phase, "chapter_execution");
+    assert.equal(detail.meta.directorSession.heavyweightRuntimeSnapshot, undefined);
+    assert.equal(detail.meta.seedPayload.styleIntentSummary.headline, "高压爽文");
+    assert.equal(detail.meta.seedPayload.styleIntentSummary.heavyweightPrompt, undefined);
+    assert.equal(detail.meta.seedPayload.takeover.downstreamReset.resetStatus, "not_started");
+    assert.equal(detail.meta.seedPayload.takeover.downstreamReset.heavyweightSnapshot, undefined);
+    assert.ok(JSON.stringify(detail).length < 12000);
+  } finally {
+    prisma.novelWorkflowTask.findUnique = originals.findUnique;
+    adapter.workflowService.healAutoDirectorTaskState = originalHeal;
+  }
+});
+
+test("auto-director retry resumes failed tasks by default", async () => {
+  const originals = {
+    archiveFindUnique: prisma.taskCenterArchive.findUnique,
+  };
+  const adapter = new NovelWorkflowTaskAdapter();
+  const originalGetTaskById = adapter.workflowService.getTaskById;
+  const originalRetryTask = adapter.workflowService.retryTask;
+  const originalContinueTask = adapter.novelDirectorService.continueTask;
+  const originalDetail = adapter.detail;
+  const calls = [];
+
+  prisma.taskCenterArchive.findUnique = async () => null;
+  adapter.workflowService.getTaskById = async () => ({
+    id: "task_failed_auto_director",
+    lane: "auto_director",
+    status: "failed",
+  });
+  adapter.workflowService.retryTask = async (taskId) => {
+    calls.push(["retry", taskId]);
+  };
+  adapter.novelDirectorService.continueTask = async (taskId, input) => {
+    calls.push(["continue", taskId, input]);
+  };
+  adapter.detail = async (taskId) => ({
+    id: taskId,
+    kind: "novel_workflow",
+  });
+
+  try {
+    const detail = await adapter.retry({
+      id: "task_failed_auto_director",
+    });
+
+    assert.equal(detail.id, "task_failed_auto_director");
+    assert.deepEqual(calls, [
+      ["retry", "task_failed_auto_director"],
+      ["continue", "task_failed_auto_director", { batchAlreadyStartedCount: undefined, forceResume: true }],
+    ]);
+  } finally {
+    prisma.taskCenterArchive.findUnique = originals.archiveFindUnique;
+    adapter.workflowService.getTaskById = originalGetTaskById;
+    adapter.workflowService.retryTask = originalRetryTask;
+    adapter.novelDirectorService.continueTask = originalContinueTask;
+    adapter.detail = originalDetail;
+  }
+});
+
 test("task center list only queries auto director workflow rows", async () => {
   const originals = {
     findMany: prisma.novelWorkflowTask.findMany,
@@ -218,6 +368,65 @@ test("task center list treats restart recovery note as running recovery instead 
   }
 });
 
+test("task center list keeps manual recovery tasks out of running display state", async () => {
+  const originals = {
+    findMany: prisma.novelWorkflowTask.findMany,
+  };
+
+  prisma.novelWorkflowTask.findMany = async () => ([
+    {
+      id: "task_manual_recovery",
+      title: "AI 自动导演",
+      lane: "auto_director",
+      status: "running",
+      pendingManualRecovery: true,
+      progress: 0.78,
+      currentStage: "节奏 / 拆章",
+      currentItemKey: "chapter_list",
+      currentItemLabel: "正在生成第 1 卷节奏段：开卷抓手",
+      checkpointType: null,
+      checkpointSummary: null,
+      resumeTargetJson: null,
+      attemptCount: 2,
+      maxAttempts: 3,
+      lastError: "服务重启后任务已暂停，等待手动恢复。",
+      createdAt: new Date("2026-04-29T03:19:37.000Z"),
+      updatedAt: new Date("2026-04-29T05:38:33.000Z"),
+      heartbeatAt: new Date("2026-04-29T05:38:33.000Z"),
+      promptTokens: 1000,
+      completionTokens: 500,
+      totalTokens: 1500,
+      llmCallCount: 2,
+      lastTokenRecordedAt: new Date("2026-04-29T05:38:33.000Z"),
+      novelId: "novel_demo",
+      novel: {
+        title: "示例小说",
+      },
+    },
+  ]);
+
+  const adapter = new NovelWorkflowTaskAdapter();
+  const originalHeal = adapter.workflowService.healAutoDirectorTaskState;
+  adapter.workflowService.healAutoDirectorTaskState = async () => false;
+
+  try {
+    const list = await adapter.list({
+      take: 10,
+    });
+
+    assert.equal(list.length, 1);
+    assert.equal(list[0].status, "queued");
+    assert.equal(list[0].pendingManualRecovery, true);
+    assert.equal(list[0].displayStatus, "等待手动恢复");
+    assert.equal(list[0].blockingReason, "服务重启后任务已暂停，等待手动恢复。");
+    assert.equal(list[0].resumeAction, "从最近检查点恢复");
+    assert.equal(list[0].recoveryHint, "服务重启后任务已暂停，等待手动恢复。");
+  } finally {
+    prisma.novelWorkflowTask.findMany = originals.findMany;
+    adapter.workflowService.healAutoDirectorTaskState = originalHeal;
+  }
+});
+
 test("task center list surfaces actual auto execution range in explainability fields", async () => {
   const originals = {
     findMany: prisma.novelWorkflowTask.findMany,
@@ -233,7 +442,7 @@ test("task center list surfaces actual auto execution range in explainability fi
       currentStage: "章节执行",
       currentItemKey: "chapter_execution",
       currentItemLabel: "第 11-20 章已准备完成",
-      checkpointType: "front10_ready",
+      checkpointType: "chapter_batch_ready",
       checkpointSummary: "第 11-20 章细化已准备完成。",
       resumeTargetJson: null,
       attemptCount: 1,
@@ -324,7 +533,7 @@ test("task detail treats review-blocked auto execution as skippable continuation
       model: "deepseek-chat",
       autoExecution: {
         enabled: true,
-        mode: "front10",
+        mode: "chapter_range",
         scopeLabel: "前 10 章",
         startOrder: 1,
         endOrder: 10,

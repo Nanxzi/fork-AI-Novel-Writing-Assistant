@@ -1,9 +1,10 @@
+import type { PipelineJobStatus } from "@ai-novel/shared/types/novel";
 import type { TaskStatus, UnifiedTaskDetail, UnifiedTaskSummary } from "@ai-novel/shared/types/task";
 import { prisma } from "../../../db/prisma";
 import { AppError } from "../../../middleware/errorHandler";
-import { NovelService } from "../../novel/NovelService";
+import type { NovelApplicationServices } from "../../novel/application/NovelApplicationContracts";
 import {
-  getPipelineQualityNotice,
+  decoratePipelineJob,
   parsePipelinePayload,
 } from "../../novel/pipelineJobState";
 import { NovelWorkflowService } from "../../novel/workflow/NovelWorkflowService";
@@ -60,13 +61,14 @@ type PipelineRow = {
 export class PipelineTaskAdapter {
   private readonly workflowService = new NovelWorkflowService();
 
-  constructor(private readonly novelService: NovelService) {}
+  constructor(private readonly novelService: Pick<NovelApplicationServices, "retryPipelineJob" | "cancelPipelineJob">) {}
 
   private toSummary(row: PipelineRow): UnifiedTaskSummary {
     const payload = parsePipelinePayload(row.payload);
-    const notice = row.status === "succeeded"
-      ? getPipelineQualityNotice(payload.qualityAlertDetails)
-      : getPipelineQualityNotice(undefined);
+    const notice = decoratePipelineJob({
+      status: row.status as PipelineJobStatus,
+      payload: row.payload,
+    });
 
     return {
       id: row.id,

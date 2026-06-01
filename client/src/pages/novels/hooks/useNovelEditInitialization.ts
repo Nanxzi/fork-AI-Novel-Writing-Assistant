@@ -26,6 +26,12 @@ interface CharacterFormState {
   personality: string;
   background: string;
   development: string;
+  appearance: string;
+  physique: string;
+  attireStyle: string;
+  signatureDetail: string;
+  voiceTexture: string;
+  presenceImpression: string;
   currentState: string;
   currentGoal: string;
 }
@@ -43,6 +49,7 @@ interface UseNovelEditInitializationArgs {
   sourceNovelBookAnalysisOptions: Array<{ id: string }>;
   sourceBookAnalysesLoading: boolean;
   sourceBookAnalysesFetching: boolean;
+  hydrateVolumeDraftFromDetail: boolean;
   setBasicForm: (value: NovelBasicFormState | ((prev: NovelBasicFormState) => NovelBasicFormState)) => void;
   setVolumeDraft: (value: VolumePlan[]) => void;
   setPipelineForm: (value: PipelineFormState | ((prev: PipelineFormState) => PipelineFormState)) => void;
@@ -59,6 +66,12 @@ const EMPTY_CHARACTER_FORM: CharacterFormState = {
   personality: "",
   background: "",
   development: "",
+  appearance: "",
+  physique: "",
+  attireStyle: "",
+  signatureDetail: "",
+  voiceTexture: "",
+  presenceImpression: "",
   currentState: "",
   currentGoal: "",
 };
@@ -76,6 +89,7 @@ export function useNovelEditInitialization({
   sourceNovelBookAnalysisOptions,
   sourceBookAnalysesLoading,
   sourceBookAnalysesFetching,
+  hydrateVolumeDraftFromDetail,
   setBasicForm,
   setVolumeDraft,
   setPipelineForm,
@@ -104,11 +118,13 @@ export function useNovelEditInitialization({
       status: detail.status,
       writingMode: detail.writingMode ?? "original",
       projectMode: detail.projectMode ?? "co_pilot",
+      readerChannelPreference: "ai_judge",
       narrativePov: detail.narrativePov ?? "third_person",
       pacePreference: detail.pacePreference ?? "balanced",
       styleTone: detail.styleTone ?? "",
       emotionIntensity: detail.emotionIntensity ?? "medium",
       aiFreedom: detail.aiFreedom ?? "medium",
+      postGenerationStyleReviewEnabled: detail.postGenerationStyleReviewEnabled ?? true,
       defaultChapterLength: detail.defaultChapterLength ?? 2800,
       estimatedChapterCount: detail.estimatedChapterCount ?? DEFAULT_ESTIMATED_CHAPTER_COUNT,
       projectStatus: detail.projectStatus ?? "not_started",
@@ -121,7 +137,9 @@ export function useNovelEditInitialization({
       continuationBookAnalysisId: detail.continuationBookAnalysisId ?? "",
       continuationBookAnalysisSections: detail.continuationBookAnalysisSections ?? [],
     });
-    setVolumeDraft(detail.volumes ?? []);
+    if (hydrateVolumeDraftFromDetail) {
+      setVolumeDraft(detail.volumes ?? []);
+    }
     const recommendedEndOrder = Math.max(
       detail.estimatedChapterCount ?? DEFAULT_ESTIMATED_CHAPTER_COUNT,
       detail.volumes?.flatMap((volume) => volume.chapters).length ?? 0,
@@ -132,7 +150,7 @@ export function useNovelEditInitialization({
       ...prev,
       endOrder: Math.max(prev.endOrder, recommendedEndOrder),
     }));
-  }, [detail, setBasicForm, setPipelineForm, setVolumeDraft]);
+  }, [detail, hydrateVolumeDraftFromDetail, setBasicForm, setPipelineForm, setVolumeDraft]);
 
   useEffect(() => {
     if (!selectedChapterId && chapters.length > 0) {
@@ -192,6 +210,12 @@ export function useNovelEditInitialization({
       personality: selectedCharacter.personality ?? "",
       background: selectedCharacter.background ?? "",
       development: selectedCharacter.development ?? "",
+      appearance: selectedCharacter.appearance ?? "",
+      physique: selectedCharacter.physique ?? "",
+      attireStyle: selectedCharacter.attireStyle ?? "",
+      signatureDetail: selectedCharacter.signatureDetail ?? "",
+      voiceTexture: selectedCharacter.voiceTexture ?? "",
+      presenceImpression: selectedCharacter.presenceImpression ?? "",
       currentState: selectedCharacter.currentState ?? "",
       currentGoal: selectedCharacter.currentGoal ?? "",
     });

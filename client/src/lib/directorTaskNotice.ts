@@ -57,7 +57,7 @@ export function buildStructuredOutlineRoute(
   }
   const search = new URLSearchParams();
   search.set("stage", "structured");
-  search.set("taskId", task.id);
+  search.set("directorTaskId", task.id);
   if (typeof volumeId === "string" && volumeId.trim()) {
     search.set("volumeId", volumeId.trim());
   }
@@ -94,7 +94,7 @@ export function resolveChapterTitleWarning(task: StructuredOutlineTaskLike | nul
     return {
       summary: taskNotice.summary,
       route: buildTaskNoticeRoute(task, taskNotice),
-      label: taskNotice.action?.label ?? "快速修复章节标题",
+      label: "快速修复章节标题",
       volumeId: taskNotice.action?.volumeId ?? task.resumeTarget?.volumeId ?? seedResumeTarget?.volumeId ?? null,
     };
   }

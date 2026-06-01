@@ -15,15 +15,25 @@ export type NovelWorkflowCheckpoint =
   | "book_contract_ready"
   | "character_setup_required"
   | "volume_strategy_ready"
-  | "front10_ready"
   | "chapter_batch_ready"
   | "replan_required"
   | "workflow_completed";
+
+export type NovelWorkflowMilestoneType =
+  | NovelWorkflowCheckpoint
+  | "rewrite_snapshot_created";
+
+export interface NovelWorkflowMilestone {
+  checkpointType: NovelWorkflowMilestoneType;
+  summary: string;
+  createdAt: string;
+}
 
 export interface NovelWorkflowResumeTarget {
   route: "/novels/create" | "/novels/:id/edit";
   novelId?: string | null;
   taskId?: string | null;
+  lane?: NovelWorkflowLane | null;
   stage?: "basic" | "story_macro" | "character" | "outline" | "structured" | "chapter" | "pipeline";
   chapterId?: string | null;
   volumeId?: string | null;

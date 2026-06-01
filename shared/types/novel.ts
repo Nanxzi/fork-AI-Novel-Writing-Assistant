@@ -7,6 +7,7 @@ export type {
   BaseCharacter,
   Character,
   CharacterCastApplyResult,
+  CharacterHardFacts,
   CharacterCastOption,
   CharacterCastOptionClearResult,
   CharacterCastOptionDeleteResult,
@@ -14,6 +15,14 @@ export type {
   CharacterCastOptionMember,
   CharacterCastOptionRelation,
   CharacterCastRole,
+  CharacterCastQualityAssessment,
+  CharacterCastQualityIssue,
+  CharacterCastQualityIssueCode,
+  CharacterVisibleProfileApplyResult,
+  CharacterVisibleProfileBatchResult,
+  CharacterVisibleProfileField,
+  CharacterVisibleProfileFields,
+  CharacterVisibleProfileSuggestion,
   CharacterRelation,
   CharacterTimeline,
   SupplementalCharacterApplyResult,
@@ -60,6 +69,21 @@ export type StoryPlanRole = "setup" | "progress" | "pressure" | "turn" | "payoff
 export type AuditType = "continuity" | "character" | "plot" | "mode_fit";
 export type AuditIssueStatus = "open" | "resolved" | "ignored";
 export type {
+  CharacterResourceContext,
+  CharacterResourceEvent,
+  CharacterResourceEventType,
+  CharacterResourceLedgerItem,
+  CharacterResourceLedgerResponse,
+  CharacterResourceNarrativeFunction,
+  CharacterResourceOwnerType,
+  CharacterResourceProposalSummary,
+  CharacterResourceRiskSignal,
+  CharacterResourceStatus,
+  CharacterResourceType,
+  CharacterResourceUpdatePayload,
+} from "./characterResource";
+
+export type {
   PayoffLedgerItem,
   PayoffLedgerResponse,
   PayoffLedgerScopeType,
@@ -77,6 +101,7 @@ export type ChapterStatus =
   | "completed";
 
 export type PipelineRunMode = "fast" | "polish";
+export type ArtifactSyncMode = "adaptive" | "deferred" | "strict";
 export type PipelineRepairMode =
   | "detect_only"
   | "light_repair"
@@ -88,6 +113,7 @@ export type PipelineRepairMode =
 export interface NovelAutoDirectorTaskSummary {
   id: string;
   status: TaskStatus;
+  pendingManualRecovery?: boolean;
   progress: number;
   currentStage?: string | null;
   currentItemLabel?: string | null;
@@ -106,7 +132,11 @@ export type ModelRouteTaskType =
   | "planner"
   | "writer"
   | "review"
+  | "light_review"
+  | "critical_review"
   | "repair"
+  | "replan"
+  | "state_resolution"
   | "summary"
   | "fact_extraction"
   | "chat";
@@ -128,6 +158,7 @@ export interface Novel {
   styleTone?: string | null;
   emotionIntensity?: EmotionIntensity | null;
   aiFreedom?: AIFreedom | null;
+  postGenerationStyleReviewEnabled: boolean;
   defaultChapterLength?: number | null;
   estimatedChapterCount?: number | null;
   projectStatus?: ProjectProgressStatus | null;
@@ -166,6 +197,7 @@ export interface Chapter {
   mustAvoid?: string | null;
   taskSheet?: string | null;
   sceneCards?: string | null;
+  styleContract?: string | null;
   repairHistory?: string | null;
   qualityScore?: number | null;
   continuityScore?: number | null;
@@ -546,6 +578,7 @@ export interface PipelineJob {
   skipCompleted?: boolean | null;
   qualityThreshold?: number | null;
   repairMode?: PipelineRepairMode | null;
+  artifactSyncMode?: ArtifactSyncMode | null;
   status: PipelineJobStatus;
   progress: number;
   completedCount: number;
@@ -679,6 +712,7 @@ export interface ReplanResult {
 export interface VolumeChapterPlan {
   id: string;
   volumeId: string;
+  chapterId?: string | null;
   chapterOrder: number;
   beatKey?: string | null;
   title: string;
@@ -693,6 +727,7 @@ export interface VolumeChapterPlan {
   mustAvoid?: string | null;
   taskSheet?: string | null;
   sceneCards?: string | null;
+  styleContract?: string | null;
   payoffRefs: string[];
   createdAt: string;
   updatedAt: string;
@@ -831,15 +866,18 @@ export interface VolumePlan {
   updatedAt: string;
 }
 
-export interface VolumePlanVersion {
+export interface VolumePlanVersionSummary {
   id: string;
   novelId: string;
   version: number;
   status: VolumePlanVersionStatus;
-  contentJson: string;
   diffSummary?: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface VolumePlanVersion extends VolumePlanVersionSummary {
+  contentJson: string;
 }
 
 export interface VolumePlanDocument {
@@ -957,7 +995,26 @@ export interface ModelRouteConfig {
   model: string;
   temperature: number;
   maxTokens?: number | null;
+  requestProtocol?: ModelRouteRequestProtocol;
+  structuredResponseFormat?: ModelRouteStructuredResponseFormat;
 }
+
+export const MODEL_ROUTE_REQUEST_PROTOCOLS = [
+  "auto",
+  "openai_compatible",
+  "anthropic",
+] as const;
+
+export type ModelRouteRequestProtocol = typeof MODEL_ROUTE_REQUEST_PROTOCOLS[number];
+
+export const MODEL_ROUTE_STRUCTURED_RESPONSE_FORMATS = [
+  "auto",
+  "json_schema",
+  "json_object",
+  "prompt_json",
+] as const;
+
+export type ModelRouteStructuredResponseFormat = typeof MODEL_ROUTE_STRUCTURED_RESPONSE_FORMATS[number];
 
 export type {
   ChapterRuntimePackage,

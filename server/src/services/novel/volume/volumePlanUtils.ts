@@ -34,12 +34,13 @@ export interface LegacyVolumeSource {
   outline?: string | null;
   structuredOutline?: string | null;
   estimatedChapterCount?: number | null;
-  chapters?: Array<Pick<Chapter, "order" | "title" | "expectation" | "targetWordCount" | "conflictLevel" | "revealLevel" | "mustAvoid" | "taskSheet" | "sceneCards">>;
+  chapters?: Array<Pick<Chapter, "order" | "title" | "expectation" | "targetWordCount" | "conflictLevel" | "revealLevel" | "mustAvoid" | "taskSheet" | "sceneCards" | "styleContract">>;
   arcPlans?: LegacyArcSignal[];
 }
 
 const volumeChapterInputSchema = z.object({
   id: z.string().trim().min(1).optional(),
+  chapterId: z.string().trim().min(1).nullable().optional(),
   chapterOrder: z.number().int().min(1).optional(),
   order: z.number().int().min(1).optional(),
   beatKey: z.string().trim().nullable().optional(),
@@ -55,6 +56,7 @@ const volumeChapterInputSchema = z.object({
   mustAvoid: z.string().trim().nullable().optional(),
   taskSheet: z.string().trim().nullable().optional(),
   sceneCards: z.string().trim().nullable().optional(),
+  styleContract: z.string().trim().nullable().optional(),
   payoffRefs: z.array(z.string().trim().min(1)).optional(),
 }).passthrough();
 
@@ -81,7 +83,7 @@ const volumeInputSchema = z.object({
 }).passthrough();
 
 export const volumeDocumentInputSchema = z.object({
-  volumes: z.array(volumeInputSchema).min(1),
+  volumes: z.array(volumeInputSchema),
 });
 
 export const volumeGenerationSchema = z.object({
@@ -98,6 +100,7 @@ export const volumeGenerationSchema = z.object({
       openPayoffs: z.array(z.string().trim().min(1)).default([]),
       chapters: z.array(
         z.object({
+          chapterId: z.string().trim().min(1).optional().nullable(),
           chapterOrder: z.number().int().min(1),
           beatKey: z.string().trim().nullable().optional(),
           title: z.string().trim().min(1),
@@ -112,6 +115,7 @@ export const volumeGenerationSchema = z.object({
           mustAvoid: z.string().trim().optional().nullable(),
           taskSheet: z.string().trim().optional().nullable(),
           sceneCards: z.string().trim().optional().nullable(),
+          styleContract: z.string().trim().optional().nullable(),
           payoffRefs: z.array(z.string().trim().min(1)).default([]),
         }),
       ).min(1),
@@ -211,6 +215,7 @@ function sanitizeVolumeChapter(
   return {
     id: chapter.id?.trim() || createLocalId(`${novelId}-chapter`),
     volumeId,
+    chapterId: normalizeText(chapter.chapterId),
     chapterOrder: chapter.chapterOrder ?? chapter.order ?? index + 1,
     beatKey: normalizeText(chapter.beatKey),
     title: chapter.title.trim(),
@@ -225,6 +230,7 @@ function sanitizeVolumeChapter(
     mustAvoid: normalizeText(chapter.mustAvoid),
     taskSheet: normalizeText(chapter.taskSheet),
     sceneCards: normalizeText(chapter.sceneCards),
+    styleContract: normalizeText(chapter.styleContract),
     payoffRefs: (chapter.payoffRefs ?? []).map((item) => item.trim()).filter(Boolean),
     createdAt: new Date(0).toISOString(),
     updatedAt: new Date(0).toISOString(),
@@ -295,12 +301,14 @@ function normalizeLegacyChapter(raw: unknown, index: number): VolumeChapterPlan 
   const mustAvoid = pickFirstString(raw, ["mustAvoid", "must_avoid", "forbidden"]);
   const taskSheet = pickFirstString(raw, ["taskSheet", "task_sheet"]);
   const sceneCards = pickFirstString(raw, ["sceneCards", "scene_cards"]);
+  const styleContract = pickFirstString(raw, ["styleContract", "style_contract"]);
   if (!title.trim() && !summary.trim()) {
     return null;
   }
   return {
     id: createLocalId("legacy-chapter"),
     volumeId: "",
+    chapterId: pickFirstString(raw, ["chapterId", "chapter_id"]),
     chapterOrder,
     beatKey,
     title,
@@ -315,6 +323,7 @@ function normalizeLegacyChapter(raw: unknown, index: number): VolumeChapterPlan 
     mustAvoid,
     taskSheet,
     sceneCards,
+    styleContract,
     payoffRefs: parseLooseStringArray(raw.payoffRefs ?? raw.payoff_refs),
     createdAt: new Date(0).toISOString(),
     updatedAt: new Date(0).toISOString(),
@@ -608,6 +617,7 @@ export function buildDerivedStructuredOutlineFromVolumes(volumes: VolumePlan[]):
           .slice()
           .sort((a, b) => a.chapterOrder - b.chapterOrder)
           .map((chapter) => ({
+            chapter_id: chapter.chapterId ?? undefined,
             order: chapter.chapterOrder,
             beat_key: chapter.beatKey ?? undefined,
             title: chapter.title,

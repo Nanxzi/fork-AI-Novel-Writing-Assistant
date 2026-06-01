@@ -12,7 +12,7 @@ import type {
   VolumeImpactResult,
   VolumePlan,
   VolumePlanDiff,
-  VolumePlanVersion,
+  VolumePlanVersionSummary,
   VolumePlanningReadiness,
   VolumeRebalanceDecision,
   VolumeStrategyPlan,
@@ -70,6 +70,7 @@ interface BuildNovelEditPlanningTabsInput {
   onGoToCharacterTab: () => void;
   latestStateSnapshot?: OutlineTabViewProps["latestStateSnapshot"];
   payoffLedger?: OutlineTabViewProps["payoffLedger"];
+  characterResources?: OutlineTabViewProps["characterResources"];
   outlineText: string;
   structuredDraftText: string;
   volumes: VolumePlan[];
@@ -81,7 +82,7 @@ interface BuildNovelEditPlanningTabsInput {
   onSaveOutline: () => void;
   isSavingOutline: boolean;
   volumeMessage: string;
-  volumeVersions: VolumePlanVersion[];
+  volumeVersions: VolumePlanVersionSummary[];
   selectedVersionId: string;
   onSelectedVersionChange: (id: string) => void;
   onCreateDraftVersion: () => void;
@@ -185,6 +186,7 @@ export function buildNovelEditPlanningTabs(input: BuildNovelEditPlanningTabsInpu
     onGoToCharacterTab: input.onGoToCharacterTab,
     latestStateSnapshot: input.latestStateSnapshot,
     payoffLedger: input.payoffLedger,
+    characterResources: input.characterResources,
     draftText: input.outlineText,
     volumes: input.volumes,
     onVolumeFieldChange: input.onVolumeFieldChange,

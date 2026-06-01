@@ -1,19 +1,30 @@
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { matchPath, Outlet, useLocation } from "react-router-dom";
 import AppRouteFallback from "./AppRouteFallback";
+import DesktopModelSetupGate from "./DesktopModelSetupGate";
+import LLMSelectionBootstrap from "./LLMSelectionBootstrap";
 import Navbar from "./Navbar";
 import NovelWorkspaceRail from "./NovelWorkspaceRail";
 import Sidebar from "./Sidebar";
+import MobileSiteShell from "./mobile/MobileSiteShell";
+import { TaskRecoveryProvider } from "./TaskRecoveryContext";
 import TaskRecoveryDialog from "./TaskRecoveryDialog";
+import { useIsMobileViewport } from "./mobile/useIsMobileViewport";
+import {
+  AUTO_DIRECTOR_MOBILE_CLASSES,
+  shouldUseAutoDirectorMobileFullWidthContent,
+} from "@/mobile/autoDirector";
 
 const SIDEBAR_COLLAPSED_STORAGE_KEY = "ai-novel.sidebar.collapsed";
 const WORKSPACE_RAIL_COLLAPSED_STORAGE_KEY = "ai-novel.workspace-rail.collapsed";
+const DEFAULT_APP_MAIN_CLASS_NAME = "h-[calc(100vh-4rem)] min-w-0 flex-1 overflow-y-auto p-6";
 
 export default function AppLayout() {
   const location = useLocation();
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [isWorkspaceRailCollapsed, setIsWorkspaceRailCollapsed] = useState(false);
   const [workspaceNavMode, setWorkspaceNavMode] = useState<"workspace" | "project">("project");
+  const isMobileViewport = useIsMobileViewport();
 
   const workspaceRoute = useMemo(() => {
     const editMatch = matchPath("/novels/:id/edit", location.pathname);
@@ -34,6 +45,12 @@ export default function AppLayout() {
   }, [location.pathname]);
 
   const isNovelWorkspace = Boolean(workspaceRoute?.novelId);
+  const useMobileNovelWorkspaceLayout = isMobileViewport && isNovelWorkspace;
+  const useMobileSiteLayout = isMobileViewport && !isNovelWorkspace;
+  const useMobileFullWidthContent = useMemo(
+    () => shouldUseAutoDirectorMobileFullWidthContent(location.pathname),
+    [location.pathname],
+  );
 
   useEffect(() => {
     const storedValue = window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY);
@@ -54,34 +71,70 @@ export default function AppLayout() {
     setWorkspaceNavMode(isNovelWorkspace ? "workspace" : "project");
   }, [isNovelWorkspace, location.pathname]);
 
-  return (
-    <div className="min-h-screen bg-background">
-      <Navbar
-        workspaceNavMode={isNovelWorkspace ? workspaceNavMode : undefined}
-        onWorkspaceNavModeChange={isNovelWorkspace ? setWorkspaceNavMode : undefined}
-      />
-      <div className="flex min-h-[calc(100vh-4rem)]">
-        {isNovelWorkspace && workspaceNavMode === "workspace" && workspaceRoute ? (
-          <NovelWorkspaceRail
-            novelId={workspaceRoute.novelId}
-            chapterId={workspaceRoute.chapterId}
-            collapsed={isWorkspaceRailCollapsed}
-            onToggle={() => setIsWorkspaceRailCollapsed((current) => !current)}
-            onSwitchToProjectNav={() => setWorkspaceNavMode("project")}
-          />
-        ) : (
-          <Sidebar
-            collapsed={isSidebarCollapsed}
-            onToggle={() => setIsSidebarCollapsed((current) => !current)}
-          />
-        )}
-        <main className="h-[calc(100vh-4rem)] flex-1 overflow-y-auto p-6">
+  if (useMobileNovelWorkspaceLayout) {
+    return (
+      <TaskRecoveryProvider>
+        <div className="min-h-screen bg-background">
+          <LLMSelectionBootstrap />
+          <DesktopModelSetupGate />
           <Suspense fallback={<AppRouteFallback />}>
             <Outlet />
           </Suspense>
-        </main>
+          <TaskRecoveryDialog />
+        </div>
+      </TaskRecoveryProvider>
+    );
+  }
+
+  if (useMobileSiteLayout) {
+    return (
+      <TaskRecoveryProvider>
+        <MobileSiteShell>
+          <LLMSelectionBootstrap />
+          <DesktopModelSetupGate />
+          <Suspense fallback={<AppRouteFallback />}>
+            <Outlet />
+          </Suspense>
+          <TaskRecoveryDialog />
+        </MobileSiteShell>
+      </TaskRecoveryProvider>
+    );
+  }
+
+  return (
+    <TaskRecoveryProvider>
+      <div className="min-h-screen bg-background">
+        <LLMSelectionBootstrap />
+        <Navbar
+          workspaceNavMode={isNovelWorkspace ? workspaceNavMode : undefined}
+          onWorkspaceNavModeChange={isNovelWorkspace ? setWorkspaceNavMode : undefined}
+        />
+        <div className="flex min-h-[calc(100vh-4rem)]">
+          <div className={useMobileFullWidthContent ? "hidden md:block" : "shrink-0"}>
+            {isNovelWorkspace && workspaceNavMode === "workspace" && workspaceRoute ? (
+              <NovelWorkspaceRail
+                novelId={workspaceRoute.novelId}
+                chapterId={workspaceRoute.chapterId}
+                collapsed={isWorkspaceRailCollapsed}
+                onToggle={() => setIsWorkspaceRailCollapsed((current) => !current)}
+                onSwitchToProjectNav={() => setWorkspaceNavMode("project")}
+              />
+            ) : (
+              <Sidebar
+                collapsed={isSidebarCollapsed}
+                onToggle={() => setIsSidebarCollapsed((current) => !current)}
+              />
+            )}
+          </div>
+          <main className={useMobileFullWidthContent ? AUTO_DIRECTOR_MOBILE_CLASSES.appMain : DEFAULT_APP_MAIN_CLASS_NAME}>
+            <DesktopModelSetupGate />
+            <Suspense fallback={<AppRouteFallback />}>
+              <Outlet />
+            </Suspense>
+          </main>
+        </div>
+        <TaskRecoveryDialog />
       </div>
-      <TaskRecoveryDialog />
-    </div>
+    </TaskRecoveryProvider>
   );
 }

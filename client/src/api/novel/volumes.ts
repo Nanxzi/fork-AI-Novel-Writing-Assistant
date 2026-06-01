@@ -8,9 +8,16 @@ import type {
   VolumePlanDiff,
   VolumePlanDocument,
   VolumePlanVersion,
+  VolumePlanVersionSummary,
   VolumeSyncPreview,
 } from "@ai-novel/shared/types/novel";
 import { apiClient } from "../client";
+
+export type SlimVolumeGenerationResponse = VolumePlanDocument & {
+  slimmed: true;
+};
+
+export type VolumeGenerationResponse = VolumePlanDocument | SlimVolumeGenerationResponse;
 
 export async function getNovelVolumeWorkspace(id: string) {
   const { data } = await apiClient.get<ApiResponse<VolumePlanDocument>>(`/novels/${id}/volumes`);
@@ -21,6 +28,7 @@ export async function updateNovelVolumes(
   id: string,
   payload: Partial<VolumePlanDocument> & {
     volumes: VolumePlan[];
+    syncToChapterExecution?: boolean;
   },
 ) {
   const { data } = await apiClient.put<ApiResponse<VolumePlanDocument>>(`/novels/${id}/volumes`, payload);
@@ -45,14 +53,20 @@ export async function generateNovelVolumes(
     respectExistingVolumeCount?: boolean;
     draftVolumes?: VolumePlan[];
     draftWorkspace?: Partial<VolumePlanDocument>;
+    slimResponse?: boolean;
   },
 ) {
-  const { data } = await apiClient.post<ApiResponse<VolumePlanDocument>>(`/novels/${id}/volumes/generate`, payload ?? {});
+  const { data } = await apiClient.post<ApiResponse<VolumeGenerationResponse>>(`/novels/${id}/volumes/generate`, payload ?? {});
   return data;
 }
 
 export async function listVolumeVersions(id: string) {
-  const { data } = await apiClient.get<ApiResponse<VolumePlanVersion[]>>(`/novels/${id}/volumes/versions`);
+  const { data } = await apiClient.get<ApiResponse<VolumePlanVersionSummary[]>>(`/novels/${id}/volumes/versions`);
+  return data;
+}
+
+export async function getVolumeVersion(id: string, versionId: string) {
+  const { data } = await apiClient.get<ApiResponse<VolumePlanVersion>>(`/novels/${id}/volumes/versions/${versionId}`);
   return data;
 }
 

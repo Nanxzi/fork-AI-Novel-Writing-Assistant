@@ -1,8 +1,111 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const { prisma } = require("../dist/db/prisma.js");
-const { persistStoryPlan } = require("../dist/services/planner/plannerPersistence.js");
+const {
+  buildChapterExecutionContractHash,
+  persistStoryPlan,
+  readPlanExecutionContractHash,
+  STORY_PLAN_PERSISTENCE_TRANSACTION_TIMEOUT_MS,
+} = require("../dist/services/planner/plannerPersistence.js");
 const { parseChapterScenePlan } = require("../../shared/dist/types/chapterLengthControl.js");
+
+test("persistStoryPlan uses an explicit timeout for planning writes", async () => {
+  const original = {
+    findFirst: prisma.storyPlan.findFirst,
+    findUnique: prisma.storyPlan.findUnique,
+    transaction: prisma.$transaction,
+  };
+  let receivedOptions = null;
+
+  prisma.storyPlan.findFirst = async () => null;
+  prisma.$transaction = async (callback, options) => {
+    receivedOptions = options;
+    return callback({
+      storyPlan: {
+        create: async () => ({ id: "plan-timeout" }),
+      },
+      chapterPlanScene: {
+        deleteMany: async () => undefined,
+      },
+    });
+  };
+  prisma.storyPlan.findUnique = async () => ({
+    id: "plan-timeout",
+    novelId: "novel-1",
+    chapterId: null,
+    level: "book",
+    title: "全书规划",
+    objective: "建立全书主线",
+    participantsJson: JSON.stringify([]),
+    revealsJson: JSON.stringify([]),
+    riskNotesJson: JSON.stringify([]),
+    mustAdvanceJson: JSON.stringify([]),
+    mustPreserveJson: JSON.stringify([]),
+    sourceIssueIdsJson: JSON.stringify([]),
+    replannedFromPlanId: null,
+    hookTarget: null,
+    status: "draft",
+    externalRef: null,
+    rawPlanJson: JSON.stringify({ ok: true }),
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    scenes: [],
+  });
+
+  try {
+    await persistStoryPlan({
+      novelId: "novel-1",
+      level: "book",
+      title: "全书规划",
+      objective: "建立全书主线",
+      participants: [],
+      reveals: [],
+      riskNotes: [],
+      mustAdvance: [],
+      mustPreserve: [],
+      sourceIssueIds: [],
+      replannedFromPlanId: null,
+      hookTarget: null,
+      scenes: [],
+    });
+
+    assert.ok(receivedOptions);
+    assert.equal(receivedOptions.timeout, STORY_PLAN_PERSISTENCE_TRANSACTION_TIMEOUT_MS);
+    assert.ok(receivedOptions.timeout > 5000);
+  } finally {
+    prisma.storyPlan.findFirst = original.findFirst;
+    prisma.storyPlan.findUnique = original.findUnique;
+    prisma.$transaction = original.transaction;
+  }
+});
+
+test("chapter execution contract hash is stable and readable from plan metadata", () => {
+  const hash = buildChapterExecutionContractHash({
+    expectation: "  第一章目标\n",
+    targetWordCount: 3000,
+    revealLevel: 1,
+    mustAvoid: "不要提前揭密",
+    taskSheet: "任务单\n必须推进",
+    sceneCards: "场景卡",
+    hook: "章末钩子",
+  });
+
+  assert.equal(hash.length, 64);
+  assert.equal(
+    hash,
+    buildChapterExecutionContractHash({
+      expectation: "第一章目标",
+      targetWordCount: 3000,
+      revealLevel: 1,
+      mustAvoid: "不要提前揭密",
+      taskSheet: "任务单 必须推进",
+      sceneCards: "场景卡",
+      hook: "章末钩子",
+    }),
+  );
+  assert.equal(readPlanExecutionContractHash(JSON.stringify({ executionContractHash: hash })), hash);
+  assert.equal(readPlanExecutionContractHash(JSON.stringify({ ok: true })), null);
+});
 
 test("persistStoryPlan syncs chapter assets and promotes empty chapters to pending_generation", async () => {
   const original = {

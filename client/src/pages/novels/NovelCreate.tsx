@@ -162,7 +162,7 @@ export default function NovelCreate() {
         const search = new URLSearchParams();
         search.set("stage", "basic");
         if (workflowTaskId) {
-          search.set("taskId", workflowTaskId);
+          search.set("workspaceTaskId", workflowTaskId);
         }
         navigate(`/novels/${response.data.id}/edit?${search.toString()}`);
       }
@@ -211,6 +211,7 @@ export default function NovelCreate() {
               <NovelAutoDirectorDialog
                 basicForm={basicForm}
                 genreOptions={genreOptions}
+                worldOptions={worldListQuery.data?.data ?? []}
                 workflowTaskId={directorWorkflowTaskId}
                 restoredTask={restoredWorkflowTask}
                 initialOpen={workflowMode === "director"}
@@ -228,7 +229,7 @@ export default function NovelCreate() {
                   const search = new URLSearchParams();
                   search.set("stage", resumeTarget?.stage ?? "story_macro");
                   if (workflowTaskId) {
-                    search.set("taskId", workflowTaskId);
+                    search.set("directorTaskId", workflowTaskId);
                   }
                   if (resumeTarget?.chapterId) {
                     search.set("chapterId", resumeTarget.chapterId);

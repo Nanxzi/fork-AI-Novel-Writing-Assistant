@@ -28,6 +28,7 @@ export interface CreateNovelInput {
   styleTone?: string;
   emotionIntensity?: "low" | "medium" | "high";
   aiFreedom?: "low" | "medium" | "high";
+  postGenerationStyleReviewEnabled?: boolean;
   defaultChapterLength?: number;
   estimatedChapterCount?: number;
   projectStatus?: "not_started" | "in_progress" | "completed" | "rework" | "blocked";
@@ -56,6 +57,7 @@ export interface UpdateNovelInput {
   styleTone?: string | null;
   emotionIntensity?: "low" | "medium" | "high" | null;
   aiFreedom?: "low" | "medium" | "high" | null;
+  postGenerationStyleReviewEnabled?: boolean;
   defaultChapterLength?: number | null;
   estimatedChapterCount?: number | null;
   projectStatus?: "not_started" | "in_progress" | "completed" | "rework" | "blocked" | null;
@@ -104,6 +106,14 @@ export interface CharacterInput {
   personality?: string;
   background?: string;
   development?: string;
+  identityLabel?: string;
+  factionLabel?: string;
+  stanceLabel?: string;
+  powerLevel?: string;
+  realm?: string;
+  currentLocation?: string;
+  availability?: string;
+  prohibitions?: string[];
   outerGoal?: string;
   innerNeed?: string;
   fear?: string;
@@ -112,6 +122,12 @@ export interface CharacterInput {
   secret?: string;
   moralLine?: string;
   firstImpression?: string;
+  appearance?: string;
+  physique?: string;
+  attireStyle?: string;
+  signatureDetail?: string;
+  voiceTexture?: string;
+  presenceImpression?: string;
   arcStart?: string;
   arcMidpoint?: string;
   arcClimax?: string;
@@ -155,6 +171,7 @@ export interface PipelineRunOptions extends LLMGenerateOptions {
   endOrder: number;
   controlPolicy?: NovelControlPolicy;
   workflowTaskId?: string;
+  taskStyleProfileId?: string;
   maxRetries?: number;
   runMode?: "fast" | "polish";
   autoReview?: boolean;
@@ -162,9 +179,11 @@ export interface PipelineRunOptions extends LLMGenerateOptions {
   skipCompleted?: boolean;
   qualityThreshold?: number;
   repairMode?: "detect_only" | "light_repair" | "heavy_repair" | "continuity_only" | "character_only" | "ending_only";
+  artifactSyncMode?: ArtifactSyncMode;
 }
 
-export type PipelineBackgroundSyncKind = "character_dynamics" | "state_snapshot" | "payoff_ledger" | "canonical_state";
+export type PipelineBackgroundSyncKind = "artifact_delta" | "character_dynamics" | "state_snapshot" | "payoff_ledger" | "character_resources" | "canonical_state";
+export type ArtifactSyncMode = "adaptive" | "deferred" | "strict";
 
 export type PipelineBackgroundSyncStatus = "running" | "failed";
 
@@ -185,6 +204,7 @@ export interface PipelineBackgroundSyncState {
 export interface PipelinePayload extends LLMGenerateOptions {
   controlPolicy?: NovelControlPolicy;
   workflowTaskId?: string;
+  taskStyleProfileId?: string;
   maxRetries?: number;
   runMode?: "fast" | "polish";
   autoReview?: boolean;
@@ -192,8 +212,10 @@ export interface PipelinePayload extends LLMGenerateOptions {
   skipCompleted?: boolean;
   qualityThreshold?: number;
   repairMode?: "detect_only" | "light_repair" | "heavy_repair" | "continuity_only" | "character_only" | "ending_only";
+  artifactSyncMode?: ArtifactSyncMode;
   qualityAlertDetails?: string[];
   replanAlertDetails?: string[];
+  recoverableRepairDetails?: string[];
   backgroundSync?: PipelineBackgroundSyncState;
 }
 
@@ -215,6 +237,7 @@ export interface ReviewOptions extends LLMGenerateOptions {
 export interface RepairOptions extends LLMGenerateOptions {
   reviewIssues?: ReviewIssue[];
   auditIssueIds?: string[];
+  repairMode?: "detect_only" | "light_repair" | "heavy_repair" | "continuity_only" | "character_only" | "ending_only";
 }
 
 export interface HookGenerateOptions extends LLMGenerateOptions {
@@ -226,7 +249,7 @@ export interface CharacterTimelineSyncOptions {
   endOrder?: number;
 }
 
-const QUALITY_THRESHOLD = { coherence: 80, repetition: 20, engagement: 75 };
+const QUALITY_THRESHOLD = { coherence: 80, repetition: 75, engagement: 75 };
 type BeatStatus = "planned" | "completed" | "skipped";
 
 const CONTINUATION_ANALYSIS_SECTION_KEYS: BookAnalysisSectionKey[] = [
@@ -417,7 +440,7 @@ export function normalizeScore(value: Partial<QualityScore>): QualityScore {
   const pacing = clamp(value.pacing ?? 0);
   const voice = clamp(value.voice ?? 0);
   const engagement = clamp(value.engagement ?? 0);
-  const overall = clamp(value.overall ?? (coherence + (100 - repetition) + pacing + voice + engagement) / 5);
+  const overall = clamp(value.overall ?? (coherence + repetition + pacing + voice + engagement) / 5);
   return { coherence, repetition, pacing, voice, engagement, overall };
 }
 
@@ -427,17 +450,17 @@ export function ruleScore(content: string): QualityScore {
   const unique = new Set(sentences);
   const repeatRatio = sentences.length > 0 ? 1 - unique.size / sentences.length : 0;
   const coherence = text.length >= 1800 ? 85 : text.length >= 1200 ? 75 : 60;
-  const repetition = clamp(repeatRatio * 100);
+  const repetition = clamp(100 - repeatRatio * 100);
   const pacing = text.length >= 1800 && text.length <= 3600 ? 82 : 70;
   const voice = sentences.length >= 25 ? 80 : 68;
   const engagement = /悬念|危机|冲突|转折/.test(text) ? 85 : 72;
-  const overall = clamp((coherence + (100 - repetition) + pacing + voice + engagement) / 5);
+  const overall = clamp((coherence + repetition + pacing + voice + engagement) / 5);
   return { coherence, repetition, pacing, voice, engagement, overall };
 }
 
 export function isPass(score: QualityScore): boolean {
   return score.coherence >= QUALITY_THRESHOLD.coherence
-    && score.repetition <= QUALITY_THRESHOLD.repetition
+    && score.repetition >= QUALITY_THRESHOLD.repetition
     && score.engagement >= QUALITY_THRESHOLD.engagement;
 }
 

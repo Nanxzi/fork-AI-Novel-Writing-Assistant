@@ -84,7 +84,7 @@ export const chapterReviewPrompt: PromptAsset<
 > = {
   id: "novel.review.chapter",
   version: "v1",
-  taskType: "review",
+  taskType: "critical_review",
   mode: "structured",
   language: "zh",
   contextPolicy: {
@@ -102,6 +102,7 @@ export const chapterReviewPrompt: PromptAsset<
   outputSchema: fullAuditOutputSchema,
   render: (input, context) => [
     new SystemMessage([
+      "repetition scoring: 0 means heavily repetitive, 100 means repetition is well controlled; higher is better.",
       "你是资深网络小说章节审校编辑。",
       "你的任务不是重写章节，而是基于正文与给定上下文，对当前章节做结构化质量评估，并输出可供后续修文使用的审查结果。",
       "",
@@ -166,6 +167,7 @@ export const chapterRepairPrompt: PromptAsset<ChapterRepairPromptInput, string, 
     maxTokensBudget: NOVEL_PROMPT_BUDGETS.chapterRepair,
     preferredGroups: [
       "repair_issues",
+      "chapter_boundary",
       "chapter_mission",
       "repair_boundaries",
       "world_rules",

@@ -1,7 +1,9 @@
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
 import { runTextPrompt } from "../../prompting/core/promptRunner";
 import { styleRewritePrompt } from "../../prompting/prompts/style/style.prompts";
+import { buildWriterStyleContractText } from "./styleContractText";
 import { StyleRuntimeResolver } from "./StyleRuntimeResolver";
+import { buildAntiAiRuleDirectiveText, listPreviewAntiAiRules } from "./antiAiPreviewRules";
 
 interface RewriteInput {
   content: string;
@@ -9,6 +11,7 @@ interface RewriteInput {
   novelId?: string;
   chapterId?: string;
   taskStyleProfileId?: string;
+  previewAntiAiRuleIds?: string[];
   issues: Array<{
     ruleName: string;
     excerpt: string;
@@ -29,17 +32,22 @@ export class StyleRewriteService {
       chapterId: input.chapterId,
       taskStyleProfileId: input.taskStyleProfileId,
     });
+    const previewRules = await listPreviewAntiAiRules(input.previewAntiAiRuleIds);
+    const existingRuleIds = new Set(resolved.antiAiRules.map((rule) => rule.id));
+    const extraPreviewRules = previewRules.filter((rule) => !existingRuleIds.has(rule.id));
 
     const issuesBlock = input.issues.map((issue, index) => (
       `${index + 1}. ${issue.ruleName}\n片段：${issue.excerpt}\n修正建议：${issue.suggestion}`
     )).join("\n\n");
+    const styleContractText = [
+      buildWriterStyleContractText(resolved.context.compiledBlocks?.contract ?? null),
+      buildAntiAiRuleDirectiveText(extraPreviewRules),
+    ].filter(Boolean).join("\n\n");
 
     const result = await runTextPrompt({
       asset: styleRewritePrompt,
       promptInput: {
-        styleBlock: resolved.context.compiledBlocks?.style ?? "",
-        characterBlock: resolved.context.compiledBlocks?.character ?? "",
-        antiAiBlock: resolved.context.compiledBlocks?.antiAi ?? "",
+        styleContractText,
         content: input.content,
         issuesBlock,
       },

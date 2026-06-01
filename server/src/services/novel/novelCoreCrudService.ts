@@ -6,6 +6,7 @@ import { mapNovelAutoDirectorTaskSummary } from "../task/novelWorkflowTaskSummar
 import { getArchivedTaskIdSet } from "../task/taskArchive";
 import { NovelWorkflowService } from "./workflow/NovelWorkflowService";
 import { NovelContinuationService } from "./NovelContinuationService";
+import { NovelVolumeService } from "./volume/NovelVolumeService";
 import { STORY_WORLD_SLICE_SCHEMA_VERSION } from "./storyWorldSlice/storyWorldSlicePersistence";
 import { syncChapterArtifacts } from "./novelChapterArtifacts";
 import { listNovelTokenUsageByNovelIds } from "./novelTokenUsageSummary";
@@ -25,6 +26,7 @@ import { queueRagDelete, queueRagUpsert } from "./novelCoreSupport";
 export class NovelCoreCrudService {
   private readonly novelContinuationService = new NovelContinuationService();
   private readonly workflowService = new NovelWorkflowService();
+  private readonly volumeService = new NovelVolumeService();
 
   private validateStoryModeSelection(primaryStoryModeId?: string | null, secondaryStoryModeId?: string | null): void {
     if (primaryStoryModeId && secondaryStoryModeId && primaryStoryModeId === secondaryStoryModeId) {
@@ -38,13 +40,42 @@ export class NovelCoreCrudService {
         skip: (page - 1) * limit,
         take: limit,
         orderBy: { updatedAt: "desc" },
-        include: {
-          genre: true,
-          primaryStoryMode: true,
-          secondaryStoryMode: true,
+        select: {
+          id: true,
+          title: true,
+          description: true,
+          targetAudience: true,
+          bookSellingPoint: true,
+          competingFeel: true,
+          first30ChapterPromise: true,
+          commercialTagsJson: true,
+          status: true,
+          writingMode: true,
+          projectMode: true,
+          narrativePov: true,
+          pacePreference: true,
+          styleTone: true,
+          emotionIntensity: true,
+          aiFreedom: true,
+          postGenerationStyleReviewEnabled: true,
+          defaultChapterLength: true,
+          estimatedChapterCount: true,
+          projectStatus: true,
+          storylineStatus: true,
+          outlineStatus: true,
+          resourceReadyScore: true,
+          sourceNovelId: true,
+          sourceKnowledgeDocumentId: true,
+          continuationBookAnalysisId: true,
+          continuationBookAnalysisSections: true,
+          genreId: true,
+          primaryStoryModeId: true,
+          secondaryStoryModeId: true,
+          worldId: true,
+          createdAt: true,
+          updatedAt: true,
+          genre: { select: { id: true, name: true } },
           world: { select: { id: true, name: true, worldType: true } },
-          bible: true,
-          bookContract: true,
           _count: { select: { chapters: true, characters: true, plotBeats: true } },
         },
       }),
@@ -71,7 +102,7 @@ export class NovelCoreCrudService {
 
   private async listLatestVisibleAutoDirectorTasksByNovelIds(
     novelIds: string[],
-    allowHealing = true,
+    allowHealing = false,
   ): Promise<Map<string, NovelAutoDirectorTaskSummary>> {
     const uniqueNovelIds = Array.from(new Set(novelIds.filter((id) => id.trim().length > 0)));
     if (uniqueNovelIds.length === 0) {
@@ -122,12 +153,54 @@ export class NovelCoreCrudService {
     }
 
     const archivedTaskIds = await getArchivedTaskIdSet("novel_workflow", rows.map((row) => row.id));
-    const taskByNovelId = new Map<string, NovelAutoDirectorTaskSummary>();
+    const visibleRows: typeof rows = [];
+    const seenNovelIds = new Set<string>();
     for (const row of rows) {
-      if (!row.novelId || archivedTaskIds.has(row.id) || taskByNovelId.has(row.novelId)) {
+      if (!row.novelId || archivedTaskIds.has(row.id) || seenNovelIds.has(row.novelId)) {
         continue;
       }
-      taskByNovelId.set(row.novelId, mapNovelAutoDirectorTaskSummary(row));
+      visibleRows.push(row);
+      seenNovelIds.add(row.novelId);
+    }
+
+    const liveTaskIds = visibleRows
+      .filter((row) => row.status === "queued" || row.status === "running" || row.status === "waiting_approval")
+      .map((row) => row.id);
+    const latestLiveStepLabelByTaskId = new Map<string, string>();
+    if (liveTaskIds.length > 0) {
+      const liveSteps = await prisma.directorStepRun.findMany({
+        where: {
+          taskId: {
+            in: liveTaskIds,
+          },
+          status: {
+            in: ["running", "waiting_approval", "blocked_scope"],
+          },
+        },
+        select: {
+          taskId: true,
+          label: true,
+        },
+        orderBy: [{ updatedAt: "desc" }, { startedAt: "desc" }],
+      });
+      for (const step of liveSteps) {
+        if (!latestLiveStepLabelByTaskId.has(step.taskId) && step.label.trim().length > 0) {
+          latestLiveStepLabelByTaskId.set(step.taskId, step.label.trim());
+        }
+      }
+    }
+
+    const taskByNovelId = new Map<string, NovelAutoDirectorTaskSummary>();
+    for (const row of visibleRows) {
+      const novelId = row.novelId;
+      if (!novelId) {
+        continue;
+      }
+      const rowCurrentItemLabel = row.currentItemLabel?.trim() || null;
+      taskByNovelId.set(novelId, mapNovelAutoDirectorTaskSummary({
+        ...row,
+        currentItemLabel: rowCurrentItemLabel ?? latestLiveStepLabelByTaskId.get(row.id) ?? row.currentItemLabel,
+      }));
     }
     return taskByNovelId;
   }
@@ -172,6 +245,7 @@ export class NovelCoreCrudService {
         styleTone: input.styleTone,
         emotionIntensity: input.emotionIntensity,
         aiFreedom: input.aiFreedom,
+        postGenerationStyleReviewEnabled: input.postGenerationStyleReviewEnabled,
         defaultChapterLength: input.defaultChapterLength,
         estimatedChapterCount: input.estimatedChapterCount,
         projectStatus: input.projectStatus,
@@ -368,6 +442,18 @@ export class NovelCoreCrudService {
     if (chapter.content) {
       await syncChapterArtifacts(novelId, chapter.id, chapter.content);
     }
+    await this.volumeService.mirrorChapterIntoWorkspace(novelId, {
+      id: chapter.id,
+      order: chapter.order,
+      title: chapter.title,
+      expectation: chapter.expectation,
+      targetWordCount: chapter.targetWordCount,
+      conflictLevel: chapter.conflictLevel,
+      revealLevel: chapter.revealLevel,
+      mustAvoid: chapter.mustAvoid,
+      taskSheet: chapter.taskSheet,
+      sceneCards: chapter.sceneCards,
+    }).catch(() => null);
     queueRagUpsert("chapter", chapter.id);
     return chapter;
   }
@@ -404,6 +490,18 @@ export class NovelCoreCrudService {
     if (typeof input.content === "string") {
       await syncChapterArtifacts(novelId, chapterId, input.content);
     }
+    await this.volumeService.mirrorChapterIntoWorkspace(novelId, {
+      id: chapter.id,
+      order: chapter.order,
+      title: chapter.title,
+      expectation: chapter.expectation,
+      targetWordCount: chapter.targetWordCount,
+      conflictLevel: chapter.conflictLevel,
+      revealLevel: chapter.revealLevel,
+      mustAvoid: chapter.mustAvoid,
+      taskSheet: chapter.taskSheet,
+      sceneCards: chapter.sceneCards,
+    }).catch(() => null);
     queueRagUpsert("chapter", chapterId);
     return chapter;
   }

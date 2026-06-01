@@ -14,12 +14,52 @@ function listen(server) {
   });
 }
 
+test("recovery task service accepts auto director resume before background work finishes", async () => {
+  const { RecoveryTaskService } = require("../dist/services/task/RecoveryTaskService.js");
+  let releaseContinue;
+  let continueStarted = false;
+  const continuePromise = new Promise((resolve) => {
+    releaseContinue = resolve;
+  });
+  const recoveryService = new RecoveryTaskService(
+    {},
+    {},
+    {
+      async continueTask(taskId) {
+        continueStarted = taskId === "workflow-1";
+        return continuePromise;
+      },
+    },
+    {},
+    {
+      async markPendingBookAnalysesForManualRecovery() {},
+      async markPendingImageTasksForManualRecovery() {},
+      async markPendingAutoDirectorTasksForManualRecovery() {},
+      async markPendingPipelineJobsForManualRecovery() {},
+      async markPendingStyleTasksForManualRecovery() {},
+    },
+  );
+
+  const result = await Promise.race([
+    recoveryService.startResumeRecoveryCandidate("novel_workflow", "workflow-1").then(() => "accepted"),
+    continuePromise.then(() => "finished"),
+  ]);
+
+  assert.equal(result, "accepted");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(continueStarted, true);
+  releaseContinue();
+  await continuePromise;
+});
+
 test("task recovery routes expose overview, recovery candidates, and resume actions", async () => {
   const originals = {
     getOverview: taskCenterService.getOverview,
     listRecoveryCandidates: recoveryTaskService.listRecoveryCandidates,
     resumeRecoveryCandidate: recoveryTaskService.resumeRecoveryCandidate,
     resumeAllRecoveryCandidates: recoveryTaskService.resumeAllRecoveryCandidates,
+    startResumeRecoveryCandidate: recoveryTaskService.startResumeRecoveryCandidate,
+    startResumeAllRecoveryCandidates: recoveryTaskService.startResumeAllRecoveryCandidates,
   };
   const calls = [];
 
@@ -52,6 +92,13 @@ test("task recovery routes expose overview, recovery candidates, and resume acti
     calls.push(["all"]);
     return [{ kind: "novel_workflow", id: "workflow-1" }];
   };
+  recoveryTaskService.startResumeRecoveryCandidate = async (kind, id) => {
+    calls.push(["single", kind, id]);
+  };
+  recoveryTaskService.startResumeAllRecoveryCandidates = async () => {
+    calls.push(["all"]);
+    return [{ kind: "novel_workflow", id: "workflow-1" }];
+  };
 
   const app = createApp();
   const server = http.createServer(app);
@@ -73,7 +120,7 @@ test("task recovery routes expose overview, recovery candidates, and resume acti
     const resumeSingleResponse = await fetch(`http://127.0.0.1:${port}/api/tasks/recovery-candidates/novel_workflow/workflow-1/resume`, {
       method: "POST",
     });
-    assert.equal(resumeSingleResponse.status, 200);
+    assert.equal(resumeSingleResponse.status, 202);
     const resumeSinglePayload = await resumeSingleResponse.json();
     assert.equal(resumeSinglePayload.success, true);
     assert.deepEqual(calls[0], ["single", "novel_workflow", "workflow-1"]);
@@ -81,7 +128,7 @@ test("task recovery routes expose overview, recovery candidates, and resume acti
     const resumeAllResponse = await fetch(`http://127.0.0.1:${port}/api/tasks/recovery-candidates/resume-all`, {
       method: "POST",
     });
-    assert.equal(resumeAllResponse.status, 200);
+    assert.equal(resumeAllResponse.status, 202);
     const resumeAllPayload = await resumeAllResponse.json();
     assert.equal(resumeAllPayload.success, true);
     assert.equal(resumeAllPayload.data.resumed.length, 1);
@@ -91,6 +138,8 @@ test("task recovery routes expose overview, recovery candidates, and resume acti
     recoveryTaskService.listRecoveryCandidates = originals.listRecoveryCandidates;
     recoveryTaskService.resumeRecoveryCandidate = originals.resumeRecoveryCandidate;
     recoveryTaskService.resumeAllRecoveryCandidates = originals.resumeAllRecoveryCandidates;
+    recoveryTaskService.startResumeRecoveryCandidate = originals.startResumeRecoveryCandidate;
+    recoveryTaskService.startResumeAllRecoveryCandidates = originals.startResumeAllRecoveryCandidates;
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 });

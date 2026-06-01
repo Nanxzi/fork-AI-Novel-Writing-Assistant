@@ -69,8 +69,45 @@ test("GenerationDecisionEngine prefers review hold when pending proposals exist"
   const action = engine.decideNextAction({
     snapshot: createSnapshot(),
     pendingReviewProposalCount: 2,
+    hasRepairableDraft: true,
   });
   assert.equal(action, "hold_for_review");
+});
+
+test("GenerationDecisionEngine repairs existing draft issues before holding for proposal review", () => {
+  const engine = new GenerationDecisionEngine();
+  const action = engine.decideNextAction({
+    snapshot: createSnapshot(),
+    pendingReviewProposalCount: 2,
+    openAuditIssueCount: 1,
+    hasRepairableDraft: true,
+  });
+  assert.equal(action, "repair_existing_chapter");
+});
+
+test("GenerationDecisionEngine auto-repairs pending proposals during full-book autopilot", () => {
+  const engine = new GenerationDecisionEngine();
+  const action = engine.decideNextAction({
+    snapshot: createSnapshot(),
+    policy: {
+      kickoffMode: "director_start",
+      advanceMode: "full_book_autopilot",
+      reviewCheckpoints: [],
+    },
+    pendingReviewProposalCount: 2,
+    hasRepairableDraft: true,
+  });
+  assert.equal(action, "repair_existing_chapter");
+});
+
+test("GenerationDecisionEngine keeps writing when pending proposals belong to a blank chapter", () => {
+  const engine = new GenerationDecisionEngine();
+  const action = engine.decideNextAction({
+    snapshot: createSnapshot(),
+    pendingReviewProposalCount: 2,
+    hasRepairableDraft: false,
+  });
+  assert.equal(action, "write_chapter");
 });
 
 test("GenerationDecisionEngine escalates overdue payoff pressure to replan", () => {

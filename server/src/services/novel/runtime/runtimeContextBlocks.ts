@@ -1,4 +1,5 @@
 import type { GenerationContextPackage } from "@ai-novel/shared/types/chapterRuntime";
+import { buildWriterStyleContractText } from "../../styleEngine/styleContractText";
 
 function compactText(value: string | null | undefined, limit: number): string {
   const normalized = String(value ?? "").replace(/\s+/g, " ").trim();
@@ -84,13 +85,28 @@ export function buildRecentChapterContentText(
 }
 
 export function buildCharactersContextText(
-  characters: Array<{ name: string; role: string; personality: string | null }>,
+  characters: Array<{
+    name: string;
+    role: string;
+    personality: string | null;
+    appearance?: string | null;
+    physique?: string | null;
+    signatureDetail?: string | null;
+    voiceTexture?: string | null;
+  }>,
 ): string {
   if (characters.length === 0) {
     return "";
   }
   return `角色底表：\n${characters
-    .map((item) => `- ${item.name}(${item.role})${item.personality ? ` ${compactText(item.personality, 80)}` : ""}`)
+    .map((item) => {
+      const visibleProfile = [
+        item.appearance || item.physique ? `样貌/体态=${compactText([item.appearance, item.physique].filter(Boolean).join("；"), 90)}` : "",
+        item.signatureDetail ? `标志=${compactText(item.signatureDetail, 60)}` : "",
+        item.voiceTexture ? `声音=${compactText(item.voiceTexture, 60)}` : "",
+      ].filter(Boolean).slice(0, 3).join(" | ");
+      return `- ${item.name}(${item.role})${item.personality ? ` ${compactText(item.personality, 80)}` : ""}${visibleProfile ? `；外显：${visibleProfile}` : ""}`;
+    })
     .join("\n")}`;
 }
 
@@ -137,15 +153,23 @@ export function buildDecisionsBlock(
 }
 
 export function buildStyleEngineBlock(styleContext: GenerationContextPackage["styleContext"]): string {
-  const compiled = styleContext?.compiledBlocks;
-  if (!compiled) {
+  const sanitizedGuidance = styleContext?.sanitizedGenerationProfile?.writingGuidance
+    ?.map((line) => line.trim())
+    .filter(Boolean) ?? [];
+  if (sanitizedGuidance.length > 0) {
+    return [
+      "Writing style guidance:",
+      "Use only transferable writing guidance. Do not copy source-work names, places, titles, catchphrases, plot turns, or iconic scenes.",
+      sanitizedGuidance.join("\n"),
+    ].filter(Boolean).join("\n\n");
+  }
+  const contract = styleContext?.compiledBlocks?.contract;
+  if (!contract) {
     return "";
   }
   return [
-    "写法引擎约束：",
-    compiled.style,
-    compiled.character,
-    compiled.antiAi,
+    "Writing style guidance:",
+    buildWriterStyleContractText(contract),
   ].filter(Boolean).join("\n\n");
 }
 

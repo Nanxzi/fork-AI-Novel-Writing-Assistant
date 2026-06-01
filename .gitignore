@@ -11,6 +11,8 @@ client/.env.local
 server/.env
 server/.env.local
 server/dev.db
+server/dev.db-shm
+server/dev.db-wal
 server/tmp_*.js
 server/tmp/**/*.db
 server/tmp/**/*.db*
@@ -25,4 +27,9 @@ server/src/prisma/dev.db-journal
 .histyory/
 .logs/
 .tmp/
+.codegraph/
+.trae/
 server/.tmp/
+desktop/build/
+desktop/runtime-migration-smoke/
+server/prisma-diff-migrations-to-schema.sql

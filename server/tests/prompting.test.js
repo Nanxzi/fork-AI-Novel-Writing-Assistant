@@ -5,15 +5,23 @@ const {
   createContextBlock,
 } = require("../dist/prompting/core/contextBudget.js");
 const {
+  promptAddendumService,
+} = require("../dist/prompting/addendums/PromptAddendumService.js");
+const {
   NOVEL_PROMPT_BUDGETS,
 } = require("../dist/prompting/prompts/novel/promptBudgetProfiles.js");
 const {
+  runTextPrompt,
   runStructuredPrompt,
   setPromptRunnerLLMFactoryForTests,
   setPromptRunnerStructuredInvokerForTests,
   streamStructuredPrompt,
   streamTextPrompt,
 } = require("../dist/prompting/core/promptRunner.js");
+const {
+  getPromptQualitySnapshot,
+  resetPromptQualityTelemetryForTests,
+} = require("../dist/prompting/core/promptQualityTelemetry.js");
 const {
   selectContextBlocks,
 } = require("../dist/prompting/core/contextSelection.js");
@@ -22,6 +30,7 @@ const {
 } = require("../dist/prompting/registry.js");
 const {
   resolveWorkflow,
+  listWorkflowDefinitions,
 } = require("../dist/prompting/workflows/workflowRegistry.js");
 const {
   plannerChapterPlanPrompt,
@@ -33,7 +42,10 @@ const {
   titleGenerationPrompt,
 } = require("../dist/prompting/prompts/helper/titleGeneration.prompt.js");
 const {
+  styleDetectionPrompt,
   styleRewritePrompt,
+  styleProfileExtractionPrompt,
+  styleProfileFromBookAnalysisPrompt,
 } = require("../dist/prompting/prompts/style/style.prompts.js");
 const {
   chapterWriterPrompt,
@@ -57,11 +69,16 @@ const {
   sanitizeWriterContextBlocks,
 } = require("../dist/prompting/prompts/novel/chapterLayeredContext.js");
 const {
-  buildSceneContractBlock,
-} = require("../dist/services/novel/chapterWritingGraphShared.js");
-const {
   directorPlanBlueprintSchema,
-} = require("../dist/services/novel/director/novelDirectorSchemas.js");
+} = require("../dist/services/novel/director/runtime/novelDirectorSchemas.js");
+
+const promptKey = (asset) => `${asset.id}@${asset.version}`;
+
+function getSinglePromptQualityEntry() {
+  const snapshot = getPromptQualitySnapshot();
+  assert.equal(snapshot.length, 1);
+  return snapshot[0];
+}
 
 test("prompt registry exposes versioned planning assets", () => {
   const keys = [
@@ -94,16 +111,18 @@ test("prompt registry exposes versioned planning assets", () => {
     "state.snapshot.extract@v4",
     "novel.payoff_ledger.sync@v5",
     "novel.characterDynamics.volumeProjection@v3",
+    "novel.character_resource.extract_updates@v1",
     "storyMode.child.generate@v1",
     "storyMode.tree.generate@v1",
     "storyWorldSlice.generate@v1",
+    promptKey(styleDetectionPrompt),
     "style.generate@v1",
-    "style.rewrite@v1",
-    "style.profile.extract@v1",
-    "style.profile.from_book_analysis@v2",
+    promptKey(styleRewritePrompt),
+    promptKey(styleProfileExtractionPrompt),
+    promptKey(styleProfileFromBookAnalysisPrompt),
     "style.recommendation@v1",
     "novel.review.chapter@v1",
-    "novel.chapter.writer@v4",
+    promptKey(chapterWriterPrompt),
     "world.draft.generate@v1",
     "world.draft.refine@v1",
     "world.draft.refine_alternatives@v1",
@@ -127,6 +146,17 @@ test("prompt registry exposes versioned planning assets", () => {
   const chapterAsset = getRegisteredPromptAsset("planner.chapter.plan", "v1");
   assert.ok(chapterAsset);
   assert.equal(chapterAsset.taskType, "planner");
+});
+
+test("prompt registry resolves style prompts by their declared asset versions", () => {
+  for (const asset of [
+    styleDetectionPrompt,
+    styleRewritePrompt,
+    styleProfileExtractionPrompt,
+    styleProfileFromBookAnalysisPrompt,
+  ]) {
+    assert.equal(getRegisteredPromptAsset(asset.id, asset.version), asset);
+  }
 });
 
 test("character cast prompt hardens real-name constraints and required gender output", () => {
@@ -229,24 +259,86 @@ test("volume strategy prompt renders volume count guidance and fixed-count const
   assert.match(String(messages[1].content), /user preferred volume count: 10/);
 });
 
-test("chapter writer prompt omits scene length budget hints in scene mode", () => {
+test("workspace diagnosis prompt requires english recommendedAction enum values", () => {
+  const asset = getRegisteredPromptAsset("novel.chapter_editor.workspace_diagnosis", "v1");
+  assert.ok(asset);
+
+  const messages = asset.render({
+    chapterTitle: "第一章",
+    chapterMission: "建立主角困境",
+    volumePositionLabel: "卷初",
+    volumePhaseLabel: "开局",
+    paceDirective: "尽快把主冲突顶上来",
+    previousChapterBridge: "无",
+    nextChapterBridge: "为下一章系统触发做铺垫",
+    activePlotThreads: ["系统伏笔", "生存压力"],
+    paragraphs: [{ index: 12, text: "主角在院中继续做杂活。" }],
+    openIssues: [{
+      severity: "medium",
+      auditType: "plot",
+      code: "pacing_slow",
+      evidence: "静态描写偏多。",
+      fixSuggestion: "压缩重复劳动描写。",
+    }],
+  });
+
+  assert.match(String(messages[0].content), /recommendedAction 只能输出英文枚举值/);
+  assert.match(String(messages[0].content), /compress（精简）/);
+  assert.match(String(messages[0].content), /polish（优化表达）/);
+  assert.match(String(messages[0].content), /不要输出中文动作词本身/);
+  assert.match(String(messages[1].content), /"recommendedAction":"compress"/);
+});
+
+test("character dynamics prompts harden plannedChapterOrders and confidence output contracts", () => {
+  const volumeAsset = getRegisteredPromptAsset("novel.characterDynamics.volumeProjection", "v3");
+  const chapterAsset = getRegisteredPromptAsset("novel.characterDynamics.chapterExtract", "v1");
+  assert.ok(volumeAsset);
+  assert.ok(chapterAsset);
+
+  const volumeMessages = volumeAsset.render({
+    novelTitle: "测试小说",
+    description: "测试简介",
+    targetAudience: "男频",
+    sellingPoint: "朝堂升级",
+    firstPromise: "前30章建立权力上升线",
+    outline: "大纲",
+    structuredOutline: "结构化大纲",
+    appliedCastOption: "默认方案",
+    rosterText: "赵高\n李斯",
+    relationText: "赵高-李斯 对立",
+    volumePlansText: "第一卷：立足；第二卷：扩权",
+  });
+  const chapterMessages = chapterAsset.render({
+    novelTitle: "测试小说",
+    targetAudience: "男频",
+    sellingPoint: "朝堂升级",
+    firstPromise: "前30章建立权力上升线",
+    currentVolumeTitle: "第一卷",
+    rosterText: "赵高\n李斯",
+    relationText: "赵高-李斯 对立",
+    chapterOrder: 1,
+    chapterTitle: "入局",
+    chapterContent: "赵高第一次被要求处理脏活。",
+  });
+
+  assert.match(String(volumeMessages[0].content), /plannedChapterOrders 如果填写，必须是正整数数组/);
+  assert.match(String(volumeMessages[0].content), /绝不能输出 null、\[null\] 或字符串数组/);
+  assert.match(String(volumeMessages[0].content), /不要输出 confidence/);
+
+  assert.match(String(chapterMessages[0].content), /confidence 是可选字段；如果填写，必须是 0-1 数字/);
+  assert.match(String(chapterMessages[0].content), /不要输出 5、10、80、百分数、中文等级或字符串化置信度/);
+  assert.match(String(chapterMessages[0].content), /"confidence":0.8/);
+});
+
+test("chapter writer prompt does not expose scene contract controls", () => {
   const messages = chapterWriterPrompt.render({
     novelTitle: "测试小说",
     chapterOrder: 1,
     chapterTitle: "起势",
     mode: "draft",
-    wordControlMode: "prompt_only",
-    sceneIndex: 1,
-    sceneCount: 3,
-    sceneTitle: "街头起势",
-    scenePurpose: "建立当前局面与第一轮冲突。",
-    roundIndex: 1,
-    maxRounds: 1,
-    isFinalRound: true,
-    closingPhase: true,
-    entryState: "主角还在被动。",
-    exitState: "主角确认反击窗口存在。",
-    forbiddenExpansion: ["不要提前解决主线"],
+    targetWordCount: 3000,
+    minWordCount: 2550,
+    maxWordCount: 3450,
   }, {
     blocks: [
       createContextBlock({
@@ -264,55 +356,14 @@ test("chapter writer prompt omits scene length budget hints in scene mode", () =
   });
 
   const systemContent = String(messages[0].content);
-  assert.match(systemContent, /场景标题：街头起势/);
-  assert.doesNotMatch(systemContent, /当前场景目标：约/);
-  assert.doesNotMatch(systemContent, /当前场景剩余预算：约/);
-  assert.doesNotMatch(systemContent, /整章目标：约/);
-  assert.doesNotMatch(systemContent, /本轮建议新增：约/);
-  assert.doesNotMatch(systemContent, /本轮硬上限：约/);
-});
-
-test("scene contract block omits direct length budget metadata", () => {
-  const block = buildSceneContractBlock({
-    scene: {
-      key: "scene_1",
-      title: "街头求生",
-      purpose: "先让主角看见现实危险。",
-      mustAdvance: ["风险落地"],
-      mustPreserve: ["压迫感"],
-      entryState: "主角刚到汴京，毫无依靠。",
-      exitState: "主角找到暂时的破局方向。",
-      forbiddenExpansion: ["不要提前引出后续大反派"],
-      targetWordCount: 900,
-    },
-    sceneIndex: 1,
-    sceneCount: 3,
-    roundPlan: {
-      mode: "prompt_only",
-      roundIndex: 1,
-      maxRounds: 1,
-      roundsLeft: 1,
-      sceneTargetWordCount: 900,
-      sceneMinWordCount: 765,
-      sceneMaxWordCount: 1035,
-      currentSceneWordCount: 0,
-      currentChapterWordCount: 0,
-      remainingSceneWordCount: 900,
-      remainingChapterWordCount: 3000,
-      suggestedRoundWordCount: 900,
-      hardRoundWordLimit: null,
-      isFinalRound: true,
-      closingPhase: true,
-    },
-  });
-
-  assert.doesNotMatch(block.content, /Scene target length:/);
-  assert.doesNotMatch(block.content, /Remaining chapter budget before this scene:/);
-  assert.doesNotMatch(block.content, /Current scene draft length:/);
-  assert.doesNotMatch(block.content, /Suggested current round length:/);
-  assert.doesNotMatch(block.content, /Current round hard limit:/);
-  assert.match(block.content, /Entry state:/);
-  assert.match(block.content, /Exit state:/);
+  const humanContent = String(messages[1].content);
+  assert.match(systemContent, /本章目标长度：约 3000 字/);
+  assert.match(systemContent, /不得明显超过上限/);
+  assert.doesNotMatch(systemContent, /当前场景合同/);
+  assert.doesNotMatch(systemContent, /场景标题/);
+  assert.doesNotMatch(systemContent, /控字数模式/);
+  assert.doesNotMatch(systemContent, /本轮硬上限/);
+  assert.doesNotMatch(humanContent, /只写当前场景/);
 });
 
 test("novel main-chain prompt assets declare explicit non-zero context budgets", () => {
@@ -326,12 +377,12 @@ test("novel main-chain prompt assets declare explicit non-zero context budgets",
     ["novel.volume.strategy.critique@v1", NOVEL_PROMPT_BUDGETS.volumeStrategyCritique],
     ["novel.volume.skeleton@v2", NOVEL_PROMPT_BUDGETS.volumeSkeleton],
     ["novel.volume.beat_sheet@v1", NOVEL_PROMPT_BUDGETS.volumeBeatSheet],
-    ["novel.volume.chapter_list@v6", NOVEL_PROMPT_BUDGETS.volumeChapterList],
+    ["novel.volume.chapter_list@v7", NOVEL_PROMPT_BUDGETS.volumeChapterList],
     ["novel.volume.chapter_purpose@v1", NOVEL_PROMPT_BUDGETS.volumeChapterDetail],
     ["novel.volume.chapter_boundary@v1", NOVEL_PROMPT_BUDGETS.volumeChapterDetail],
     ["novel.volume.chapter_task_sheet@v2", NOVEL_PROMPT_BUDGETS.volumeChapterDetail],
     ["novel.volume.rebalance.adjacent@v1", NOVEL_PROMPT_BUDGETS.volumeRebalance],
-    ["novel.chapter.writer@v4", NOVEL_PROMPT_BUDGETS.chapterWriter],
+    [promptKey(chapterWriterPrompt), NOVEL_PROMPT_BUDGETS.chapterWriter],
     ["novel.review.chapter@v1", NOVEL_PROMPT_BUDGETS.chapterReview],
     ["novel.review.repair@v1", NOVEL_PROMPT_BUDGETS.chapterRepair],
     ["audit.chapter.full@v2", NOVEL_PROMPT_BUDGETS.chapterReview],
@@ -374,7 +425,7 @@ test("writer guard strips forbidden context groups before prompt execution", () 
 });
 
 test("chapter writer prompt carries explicit target length and continuation instructions", () => {
-  const asset = getRegisteredPromptAsset("novel.chapter.writer", "v4");
+  const asset = getRegisteredPromptAsset(chapterWriterPrompt.id, chapterWriterPrompt.version);
   assert.ok(asset);
 
   const draftMessages = asset.render({
@@ -624,6 +675,24 @@ test("workflow registry expands produce_novel into the fixed production chain", 
   assert.equal(resolution.actions[6].input.targetChapterCount, 18);
 });
 
+test("workflow registry split keeps key workflow domains registered", () => {
+  const definitions = listWorkflowDefinitions();
+  const intents = new Set(definitions.map((definition) => definition.intent));
+
+  assert.ok(definitions.length >= 33);
+  [
+    "produce_novel",
+    "analyze_director_workspace",
+    "evaluate_manual_edit_impact",
+    "write_chapter",
+    "rewrite_chapter",
+    "query_progress",
+    "unknown",
+  ].forEach((intent) => assert.ok(intents.has(intent), `${intent} should stay registered`));
+
+  assert.equal(definitions.length, intents.size);
+});
+
 test("planner chapter prompt post validator rejects structurally unusable chapter plans", () => {
   assert.throws(() => plannerChapterPlanPrompt.postValidate({
     title: "第 3 章",
@@ -776,7 +845,7 @@ test("story mode child prompt post validator rejects duplicate sibling names and
   }));
 });
 
-test.skip("book analysis source note prompt enforces grounded Chinese extraction", () => {
+test.skip("book analysis source note prompt enforces grounded Chinese extraction", { skip: "Prompt text snapshot is pending migration to prompt asset contract assertions." }, () => {
   const messages = bookAnalysisSourceNotePrompt.render({
     segmentLabel: "片段 1",
     segmentContent: "主角在雨夜第一次见到反派组织的信使。",
@@ -794,7 +863,7 @@ test.skip("book analysis source note prompt enforces grounded Chinese extraction
   assert.match(String(messages[0].content), /evidence：提供最多3条证据/);
 });
 
-test.skip("book analysis section prompt includes section-specific structuredData contract", () => {
+test.skip("book analysis section prompt includes section-specific structuredData contract", { skip: "Prompt text snapshot is pending migration to prompt asset contract assertions." }, () => {
   const messages = bookAnalysisSectionPrompt.render({
     sectionKey: "overview",
     sectionTitle: "拆书总览",
@@ -896,6 +965,7 @@ test("world draft refine alternatives post validator enforces exact alternative 
 });
 
 test("runStructuredPrompt forwards repair policy and context telemetry", async () => {
+  resetPromptQualityTelemetryForTests();
   const originalRepairPolicy = genreTreePrompt.repairPolicy;
   const originalContextPolicy = { ...genreTreePrompt.contextPolicy };
   let captured = null;
@@ -959,6 +1029,16 @@ test("runStructuredPrompt forwards repair policy and context telemetry", async (
     assert.equal(result.meta.invocation.semanticRetryAttempts, 0);
     assert.deepEqual(result.meta.invocation.droppedContextBlockIds, ["overflow-1"]);
     assert.deepEqual(result.meta.invocation.summarizedContextBlockIds, ["core-1"]);
+    const telemetry = getSinglePromptQualityEntry();
+    assert.equal(telemetry.promptId, genreTreePrompt.id);
+    assert.equal(telemetry.completedCount, 1);
+    assert.equal(telemetry.failedCount, 0);
+    assert.equal(telemetry.repairRunCount, 1);
+    assert.equal(telemetry.repairAttempts, 2);
+    assert.equal(telemetry.semanticRetryRunCount, 0);
+    assert.ok(telemetry.totalEstimatedInputTokens > 0);
+    assert.ok(telemetry.totalRenderedPromptChars > 0);
+    assert.ok(telemetry.totalOutputChars > 0);
   } finally {
     genreTreePrompt.repairPolicy = originalRepairPolicy;
     genreTreePrompt.contextPolicy = originalContextPolicy;
@@ -967,6 +1047,7 @@ test("runStructuredPrompt forwards repair policy and context telemetry", async (
 });
 
 test("runStructuredPrompt retries semantically after postValidate failure", async () => {
+  resetPromptQualityTelemetryForTests();
   const originalSemanticRetryPolicy = plannerChapterPlanPrompt.semanticRetryPolicy;
   const calls = [];
 
@@ -1037,6 +1118,14 @@ test("runStructuredPrompt retries semantically after postValidate failure", asyn
     assert.equal(result.meta.invocation.repairAttempts, 1);
     assert.equal(result.meta.invocation.semanticRetryUsed, true);
     assert.equal(result.meta.invocation.semanticRetryAttempts, 1);
+    const telemetry = getSinglePromptQualityEntry();
+    assert.equal(telemetry.completedCount, 1);
+    assert.equal(telemetry.semanticRetryStartCount, 1);
+    assert.equal(telemetry.semanticRetryDoneCount, 1);
+    assert.equal(telemetry.semanticRetryRunCount, 1);
+    assert.equal(telemetry.semanticRetryAttempts, 1);
+    assert.equal(telemetry.repairRunCount, 1);
+    assert.equal(telemetry.repairAttempts, 1);
   } finally {
     plannerChapterPlanPrompt.semanticRetryPolicy = originalSemanticRetryPolicy;
     setPromptRunnerStructuredInvokerForTests();
@@ -1044,6 +1133,7 @@ test("runStructuredPrompt retries semantically after postValidate failure", asyn
 });
 
 test("streamTextPrompt buffers streamed output and resolves completion metadata", async () => {
+  resetPromptQualityTelemetryForTests();
   const originalContextPolicy = { ...styleRewritePrompt.contextPolicy };
   styleRewritePrompt.contextPolicy = {
     maxTokensBudget: 8,
@@ -1102,8 +1192,187 @@ test("streamTextPrompt buffers streamed output and resolves completion metadata"
     assert.deepEqual(completed.meta.invocation.droppedContextBlockIds, ["overflow-1"]);
     assert.deepEqual(completed.meta.invocation.summarizedContextBlockIds, ["core-1"]);
     assert.equal(completed.meta.invocation.repairAttempts, 0);
+    const telemetry = getSinglePromptQualityEntry();
+    assert.equal(telemetry.completedCount, 1);
+    assert.equal(telemetry.emptyOutputCount, 0);
+    assert.equal(telemetry.totalOutputChars, 2);
   } finally {
     styleRewritePrompt.contextPolicy = originalContextPolicy;
+    setPromptRunnerLLMFactoryForTests();
+  }
+});
+
+test("runTextPrompt records empty outputs without changing return behavior", async () => {
+  resetPromptQualityTelemetryForTests();
+  setPromptRunnerLLMFactoryForTests(async () => ({
+    invoke: async () => ({
+      content: "   ",
+      usage_metadata: {
+        input_tokens: 10,
+        output_tokens: 1,
+        total_tokens: 11,
+      },
+    }),
+  }));
+
+  try {
+    const result = await runTextPrompt({
+      asset: styleRewritePrompt,
+      promptInput: {
+        styleBlock: "叙事紧凑",
+        characterBlock: "动作表达情绪",
+        antiAiBlock: "禁止解释性心理描写",
+        content: "原文",
+        issuesBlock: "问题",
+      },
+    });
+
+    assert.equal(result.output, "   ");
+    const telemetry = getSinglePromptQualityEntry();
+    assert.equal(telemetry.completedCount, 1);
+    assert.equal(telemetry.emptyOutputCount, 1);
+    assert.equal(telemetry.totalOutputChars, 3);
+    assert.equal(telemetry.promptTokens, 10);
+    assert.equal(telemetry.completionTokens, 1);
+    assert.equal(telemetry.totalTokens, 11);
+  } finally {
+    setPromptRunnerLLMFactoryForTests();
+  }
+});
+
+test("prompt runner records failed executions without swallowing the original error", async () => {
+  resetPromptQualityTelemetryForTests();
+  const originalError = new Error("provider timeout");
+  setPromptRunnerLLMFactoryForTests(async () => ({
+    invoke: async () => {
+      throw originalError;
+    },
+  }));
+
+  try {
+    await assert.rejects(
+      () => runTextPrompt({
+        asset: styleRewritePrompt,
+        promptInput: {
+          styleBlock: "叙事紧凑",
+          characterBlock: "动作表达情绪",
+          antiAiBlock: "禁止解释性心理描写",
+          content: "原文",
+          issuesBlock: "问题",
+        },
+      }),
+      (error) => error === originalError,
+    );
+    const telemetry = getSinglePromptQualityEntry();
+    assert.equal(telemetry.completedCount, 0);
+    assert.equal(telemetry.failedCount, 1);
+    assert.equal(telemetry.failuresByKind.llm_error, 1);
+  } finally {
+    setPromptRunnerLLMFactoryForTests();
+  }
+});
+
+test("prompt runner injects enabled custom addendum blocks for supported prompts", async () => {
+  const originalResolveContextBlocks = promptAddendumService.resolveContextBlocks;
+  let capturedMessages = [];
+  promptAddendumService.resolveContextBlocks = async ({ promptId, novelId }) => {
+    assert.equal(promptId, "novel.chapter.writer");
+    assert.equal(novelId, "novel-1");
+    return [
+      createContextBlock({
+        id: "custom_addendum:global:test",
+        group: "custom_addendum",
+        priority: 999,
+        required: true,
+        content: "【全局补充要求】\n禁止模板化表达。",
+      }),
+      createContextBlock({
+        id: "custom_addendum:novel:test",
+        group: "custom_addendum",
+        priority: 899,
+        required: true,
+        content: "【本书补充要求】\n保留主角冷静克制的表达。",
+      }),
+    ];
+  };
+  setPromptRunnerLLMFactoryForTests(async () => ({
+    invoke: async (messages) => {
+      capturedMessages = messages;
+      return { content: "正文" };
+    },
+  }));
+
+  try {
+    const result = await runTextPrompt({
+      asset: chapterWriterPrompt,
+      promptInput: {
+        novelTitle: "测试小说",
+        chapterOrder: 1,
+        chapterTitle: "第一章",
+      },
+      contextBlocks: [],
+      options: { novelId: "novel-1" },
+    });
+
+    assert.equal(result.output, "正文");
+    assert.deepEqual(result.meta.invocation.customAddendumBlockIds, [
+      "custom_addendum:global:test",
+      "custom_addendum:novel:test",
+    ]);
+    const rendered = capturedMessages.map((message) => String(message.content)).join("\n");
+    assert.match(rendered, /禁止模板化表达/);
+    assert.match(rendered, /保留主角冷静克制的表达/);
+  } finally {
+    promptAddendumService.resolveContextBlocks = originalResolveContextBlocks;
+    setPromptRunnerLLMFactoryForTests();
+  }
+});
+
+test("prompt runner skips custom addendums for prompts outside the allowlist", async () => {
+  const originalResolveContextBlocks = promptAddendumService.resolveContextBlocks;
+  let called = false;
+  promptAddendumService.resolveContextBlocks = async () => {
+    called = true;
+    return [
+      createContextBlock({
+        id: "custom_addendum:global:unexpected",
+        group: "custom_addendum",
+        priority: 999,
+        required: true,
+        content: "不应注入。",
+      }),
+    ];
+  };
+  setPromptRunnerLLMFactoryForTests(async () => ({
+    stream: async () => ({
+      async *[Symbol.asyncIterator]() {
+        yield { content: "修订" };
+      },
+    }),
+  }));
+
+  try {
+    const handle = await streamTextPrompt({
+      asset: styleRewritePrompt,
+      promptInput: {
+        styleBlock: "叙事紧凑",
+        characterBlock: "动作表达情绪",
+        antiAiBlock: "禁止解释性心理描写",
+        content: "原文",
+        issuesBlock: "问题",
+      },
+      contextBlocks: [],
+      options: { novelId: "novel-1" },
+    });
+
+    for await (const _chunk of handle.stream) {
+      // drain stream
+    }
+    const completed = await handle.complete;
+    assert.equal(completed.meta.invocation.customAddendumBlockIds.length, 0);
+    assert.equal(called, false);
+  } finally {
+    promptAddendumService.resolveContextBlocks = originalResolveContextBlocks;
     setPromptRunnerLLMFactoryForTests();
   }
 });
@@ -1225,6 +1494,7 @@ test("streamStructuredPrompt parses top-level array outputs and ignores trailing
 });
 
 test("streamStructuredPrompt can recover with semantic retry after streamed output fails post validation", async () => {
+  resetPromptQualityTelemetryForTests();
   const originalSemanticRetryPolicy = plannerChapterPlanPrompt.semanticRetryPolicy;
   let retryCall = null;
 
@@ -1285,6 +1555,12 @@ test("streamStructuredPrompt can recover with semantic retry after streamed outp
     assert.equal(completed.meta.invocation.semanticRetryUsed, true);
     assert.equal(completed.meta.invocation.semanticRetryAttempts, 1);
     assert.equal(completed.meta.invocation.repairAttempts, 0);
+    const telemetry = getSinglePromptQualityEntry();
+    assert.equal(telemetry.completedCount, 1);
+    assert.equal(telemetry.semanticRetryStartCount, 1);
+    assert.equal(telemetry.semanticRetryDoneCount, 1);
+    assert.equal(telemetry.semanticRetryRunCount, 1);
+    assert.equal(telemetry.semanticRetryAttempts, 1);
   } finally {
     plannerChapterPlanPrompt.semanticRetryPolicy = originalSemanticRetryPolicy;
     setPromptRunnerLLMFactoryForTests();

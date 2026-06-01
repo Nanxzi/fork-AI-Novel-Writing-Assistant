@@ -1,8 +1,12 @@
 import type { BaseMessageChunk } from "@langchain/core/messages";
-import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
 import { prisma } from "../../db/prisma";
-import { getLLM } from "../../llm/factory";
+import { streamTextPrompt } from "../../prompting/core/promptRunner";
+import {
+  writingFormulaApplyGenerateStreamPrompt,
+  writingFormulaApplyRewriteStreamPrompt,
+  writingFormulaExtractStreamPrompt,
+} from "../../prompting/prompts/writingFormula/writingFormulaStream.prompts";
 
 interface ExtractFormulaInput {
   name: string;
@@ -53,26 +57,22 @@ export class WritingFormulaService {
   }
 
   async createExtractStream(input: ExtractFormulaInput) {
-    const llm = await getLLM(input.provider ?? "deepseek", {
-      model: input.model,
-      temperature: 0.6,
+    const streamed = await streamTextPrompt({
+      asset: writingFormulaExtractStreamPrompt,
+      promptInput: {
+        extractLevel: input.extractLevel,
+        focusAreas: input.focusAreas,
+        sourceText: input.sourceText,
+      },
+      options: {
+        provider: input.provider ?? "deepseek",
+        model: input.model,
+        temperature: 0.6,
+      },
     });
 
-    const stream = await llm.stream([
-      new SystemMessage(
-        `你是一个专业的写作风格分析专家，能够深度解析文学作品的创作技巧。
-请对文本进行 ${input.extractLevel} 级别分析，重点关注：${input.focusAreas.join(", ")}。
-输出格式（Markdown）：
-## 整体风格定位
-## 核心写作技巧（含原文例句）
-## 可复现的写作公式
-## 应用指南（如何用这个公式写新文本）`,
-      ),
-      new HumanMessage(input.sourceText),
-    ]);
-
     return {
-      stream: stream as AsyncIterable<BaseMessageChunk>,
+      stream: streamed.stream as AsyncIterable<BaseMessageChunk>,
       onDone: async (fullContent: string) => {
         await prisma.writingFormula.create({
           data: {
@@ -90,11 +90,6 @@ export class WritingFormulaService {
   }
 
   async createApplyStream(input: ApplyFormulaInput) {
-    const llm = await getLLM(input.provider ?? "deepseek", {
-      model: input.model,
-      temperature: 0.7,
-    });
-
     const formulaContent =
       input.formulaContent ??
       (input.formulaId
@@ -105,18 +100,26 @@ export class WritingFormulaService {
       throw new Error("未找到可用写作公式内容。");
     }
 
+    const baseOptions = {
+      provider: input.provider ?? "deepseek",
+      model: input.model,
+      temperature: input.mode === "rewrite" ? 0.7 : 0.7,
+    };
+
     if (input.mode === "rewrite") {
       if (!input.sourceText) {
         throw new Error("rewrite 模式需要 sourceText。");
       }
-      const stream = await llm.stream([
-        new SystemMessage(
-          "你是一位专业的写作助手。请严格按照以下写作公式，对给定文本进行改写。要求：保持原文核心意思不变，但文风、节奏、句式按照公式重塑。",
-        ),
-        new HumanMessage(`写作公式：\n${formulaContent}\n\n原文：\n${input.sourceText}`),
-      ]);
+      const streamed = await streamTextPrompt({
+        asset: writingFormulaApplyRewriteStreamPrompt,
+        promptInput: {
+          formulaContent,
+          sourceText: input.sourceText,
+        },
+        options: baseOptions,
+      });
       return {
-        stream: stream as AsyncIterable<BaseMessageChunk>,
+        stream: streamed.stream as AsyncIterable<BaseMessageChunk>,
       };
     }
 
@@ -124,15 +127,17 @@ export class WritingFormulaService {
       throw new Error("generate 模式需要 topic。");
     }
     const targetLength = input.targetLength ?? 1200;
-    const stream = await llm.stream([
-      new SystemMessage(
-        `你是一位专业的写作助手。请严格按照以下写作公式，围绕给定主题创作新内容。
-要求：字数控制在 ${targetLength} 字左右，每个段落都体现公式核心特征。`,
-      ),
-      new HumanMessage(`写作公式：\n${formulaContent}\n\n创作主题：\n${input.topic}`),
-    ]);
+    const streamed = await streamTextPrompt({
+      asset: writingFormulaApplyGenerateStreamPrompt,
+      promptInput: {
+        formulaContent,
+        topic: input.topic,
+        targetLength,
+      },
+      options: baseOptions,
+    });
     return {
-      stream: stream as AsyncIterable<BaseMessageChunk>,
+      stream: streamed.stream as AsyncIterable<BaseMessageChunk>,
     };
   }
 }

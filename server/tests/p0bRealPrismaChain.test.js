@@ -6,15 +6,22 @@ const childProcess = require("node:child_process");
 
 const repoRoot = path.resolve(__dirname, "..", "..");
 const serverRoot = path.resolve(repoRoot, "server");
-const seedDatabasePath = path.resolve(serverRoot, "dev.db");
+
+function pnpmExecutable() {
+  return process.platform === "win32" ? "pnpm.cmd" : "pnpm";
+}
 
 function setupTempSqliteDatabase(tempDir) {
-  if (!fs.existsSync(seedDatabasePath)) {
-    throw new Error(`seed database not found: ${seedDatabasePath}`);
-  }
   const databasePath = path.join(tempDir, "p0b-real-chain.db");
-  fs.copyFileSync(seedDatabasePath, databasePath);
   const databaseUrl = `file:${databasePath.replace(/\\/g, "/")}`;
+  childProcess.execFileSync(pnpmExecutable(), ["--filter", "@ai-novel/server", "prisma:push"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      DATABASE_URL: databaseUrl,
+    },
+    stdio: ["ignore", "ignore", "pipe"],
+  });
   return databaseUrl;
 }
 
@@ -31,6 +38,7 @@ async function main() {
   const { prisma } = require(path.join(repoRoot, "server", "dist", "db", "prisma.js"));
   const { NovelService } = require(path.join(repoRoot, "server", "dist", "services", "novel", "NovelService.js"));
   const { NovelCoreReviewService } = require(path.join(repoRoot, "server", "dist", "services", "novel", "novelCoreReviewService.js"));
+  const { NovelDirectorService } = require(path.join(repoRoot, "server", "dist", "services", "novel", "director", "NovelDirectorService.js"));
   const { NovelWorldSliceService } = require(path.join(repoRoot, "server", "dist", "services", "novel", "storyWorldSlice", "NovelWorldSliceService.js"));
   const { NovelContinuationService } = require(path.join(repoRoot, "server", "dist", "services", "novel", "NovelContinuationService.js"));
   const { StyleBindingService } = require(path.join(repoRoot, "server", "dist", "services", "styleEngine", "StyleBindingService.js"));
@@ -129,7 +137,7 @@ async function main() {
           openPayoffsJson: JSON.stringify(["赵高线索", "宫廷身份伏笔"]),
         },
       });
-      await prisma.volumeChapterPlan.create({
+      const volumeChapter = await prisma.volumeChapterPlan.create({
         data: {
           volumeId: volume.id,
           chapterOrder: 1,
@@ -143,6 +151,56 @@ async function main() {
       const workspace = await novelService.getVolumes(novel.id);
       workspaceSource = workspace.source;
       volumeId = volume.id;
+      if (scenario === "director_resume") {
+        await novelService.updateVolumes(novel.id, {
+          strategyPlan: {
+            recommendedVolumeCount: 1,
+            hardPlannedVolumeCount: 1,
+            readerRewardLadder: "pressure -> survival -> counter-pressure",
+            escalationLadder: "palace pressure -> faction threat -> identity clue",
+            midpointShift: "The protagonist stops reacting and starts setting traps.",
+            notes: "Real Prisma resume fixture for persisted volume strategy.",
+            volumes: [{
+              sortOrder: 1,
+              planningMode: "hard",
+              roleLabel: "Opening pressure volume",
+              coreReward: "The protagonist wins the first survival foothold.",
+              escalationFocus: "Court pressure and Zhao Gao clues tighten together.",
+              uncertaintyLevel: "low",
+            }],
+            uncertainties: [],
+          },
+          volumes: [{
+            id: volume.id,
+            sortOrder: 1,
+            title: "Opening Volume",
+            summary: "The protagonist survives the first palace pressure chain.",
+            openingHook: "She wakes up inside the Qin palace with no allies.",
+            mainPromise: "Survive the palace order and expose the first Zhao Gao shadow.",
+            primaryPressureSource: "Palace hierarchy",
+            coreSellingPoint: "Identity reversal under court pressure",
+            escalationMode: "Pressure, probe, counter-pressure",
+            protagonistChange: "From passive survival to active setup.",
+            midVolumeRisk: "A false ally almost exposes her.",
+            climax: "She finds the first Zhao Gao clue.",
+            payoffType: "Survival foothold",
+            nextVolumeHook: "The clue points to a wider historical conspiracy.",
+            resetPoint: null,
+            openPayoffs: ["Zhao Gao clue", "hidden identity"],
+            status: "active",
+            chapters: [{
+              id: volumeChapter.id,
+              chapterOrder: 1,
+              title: "First Pressure",
+              summary: "She learns the palace rules and pays the first cost.",
+              purpose: "Open the survival pressure chain.",
+              targetWordCount: 3000,
+              taskSheet: "Establish pressure, then plant the Zhao Gao clue.",
+              payoffRefs: ["Zhao Gao clue"],
+            }],
+          }],
+        });
+      }
     }
 
     if (!volumeId) {
@@ -246,6 +304,118 @@ async function main() {
       },
     });
 
+    if (scenario === "director_resume") {
+      const directorService = new NovelDirectorService();
+      const taskId = "task_p0b_director_resume";
+      const pipelineRuns = [];
+      const scheduledRuns = [];
+      const directorInput = {
+        idea: "A worker wakes up in the Qin palace and must survive court pressure.",
+        batchId: "batch_p0b_director_resume",
+        round: 1,
+        candidate: {
+          id: "candidate_p0b_director_resume",
+          workingTitle: "Qin Palace Survival",
+          logline: "A modern worker survives a Qin palace identity trap while approaching the Zhao Gao truth.",
+          positioning: "Historical pressure survival",
+          sellingPoint: "Identity reversal plus palace pressure",
+          coreConflict: "She must survive the palace rules without exposing the ultimate identity clue.",
+          protagonistPath: "From passive survivor to active operator.",
+          endingDirection: "The first Zhao Gao clue opens a wider conspiracy.",
+          hookStrategy: "Each survival move reveals one deeper historical shadow.",
+          progressionLoop: "Pressure, survive, probe, counter-pressure.",
+          whyItFits: "Clear beginner-friendly pressure chain.",
+          toneKeywords: ["historical", "pressure", "survival"],
+          targetChapterCount: 20,
+        },
+        workflowTaskId: taskId,
+        provider: "deepseek",
+        model: "deepseek-chat",
+        temperature: 0.7,
+        runMode: "auto_to_ready",
+        writingMode: "original",
+        projectMode: "ai_led",
+        narrativePov: "third_person",
+        pacePreference: "fast",
+        emotionIntensity: "high",
+        aiFreedom: "medium",
+        estimatedChapterCount: 20,
+      };
+      const resumeTarget = {
+        novelId: novel.id,
+        taskId,
+        stage: "outline",
+        volumeId,
+      };
+
+      await prisma.novelWorkflowTask.create({
+        data: {
+          id: taskId,
+          novelId: novel.id,
+          lane: "auto_director",
+          title: "Real Prisma director resume",
+          status: "failed",
+          progress: 0.52,
+          currentStage: "outline",
+          currentItemKey: "volume_strategy",
+          currentItemLabel: "Volume strategy was persisted before interruption",
+          checkpointType: "volume_strategy_ready",
+          checkpointSummary: "Volume strategy persisted before resume.",
+          resumeTargetJson: JSON.stringify(resumeTarget),
+          seedPayloadJson: JSON.stringify({
+            novelId: novel.id,
+            directorInput,
+            directorSession: {
+              runMode: "auto_to_ready",
+              phase: "volume_strategy",
+              isBackgroundRunning: false,
+              lockedScopes: ["basic", "story_macro", "character", "outline", "structured", "chapter", "pipeline"],
+              reviewScope: null,
+            },
+            resumeTarget,
+          }),
+          lastError: "Simulated interruption after volume strategy persistence.",
+        },
+      });
+
+      directorService.continueCandidateStageTask = async () => false;
+      directorService.assertHighMemoryDirectorStartAllowed = async () => undefined;
+      directorService.scheduleBackgroundRun = (scheduledTaskId, runner) => {
+        scheduledRuns.push({ taskId: scheduledTaskId, runner });
+      };
+      directorService.runDirectorPipeline = async (input) => {
+        pipelineRuns.push(input);
+      };
+
+      await directorService.continueTask(taskId);
+      await Promise.all(scheduledRuns.map((item) => item.runner()));
+
+      const refreshedTask = await prisma.novelWorkflowTask.findUnique({ where: { id: taskId } });
+      const persistedWorkspace = await novelService.getVolumes(novel.id);
+      const persistedResumeTarget = refreshedTask?.resumeTargetJson
+        ? JSON.parse(refreshedTask.resumeTargetJson)
+        : null;
+
+      console.log(JSON.stringify({
+        scenario,
+        workspaceSource: persistedWorkspace.source,
+        persistedStrategy: Boolean(persistedWorkspace.strategyPlan),
+        persistedVolumeCount: persistedWorkspace.volumes.length,
+        scheduledRunCount: scheduledRuns.length,
+        pipelineStartPhase: pipelineRuns[0]?.startPhase ?? null,
+        pipelineScope: pipelineRuns[0]?.scope ?? null,
+        pipelineVolumeId: typeof pipelineRuns[0]?.scope === "string" && pipelineRuns[0].scope.startsWith("volume:")
+          ? pipelineRuns[0].scope.slice("volume:".length)
+          : null,
+        taskStatus: refreshedTask?.status ?? null,
+        taskStage: refreshedTask?.currentStage ?? null,
+        taskItemKey: refreshedTask?.currentItemKey ?? null,
+        resumeTargetStage: persistedResumeTarget?.stage ?? null,
+        resumeTargetVolumeId: persistedResumeTarget?.volumeId ?? null,
+      }));
+      return;
+    }
+
     await reviewService.auditChapter(novel.id, chapter.id, "plot", {});
 
     console.log(JSON.stringify({
@@ -295,7 +465,16 @@ function runScenario(scenario) {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     });
-    return JSON.parse(stdout.trim());
+    const jsonLine = stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .reverse()
+      .find((line) => line.startsWith("{"));
+    if (!jsonLine) {
+      throw new Error(`Child scenario did not write a JSON result. stdout=${stdout}`);
+    }
+    return JSON.parse(jsonLine);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -323,4 +502,22 @@ test("volume workspace projects feed the same shared review context through manu
   assert.match(result.volumeMission ?? "", /压迫|求生|赵高/);
   assert.ok(result.structureObligations.some((item) => /推进求生动机/.test(item)));
   assert.ok(result.participantNames.includes("刘雪婷"));
+});
+
+test("persisted volume strategy resumes auto director into structured outline on a real sqlite chain", () => {
+  const result = runScenario("director_resume");
+
+  assert.equal(result.scenario, "director_resume");
+  assert.equal(result.workspaceSource, "volume");
+  assert.equal(result.persistedStrategy, true);
+  assert.ok(result.persistedVolumeCount > 0);
+  assert.equal(result.scheduledRunCount, 1);
+  assert.equal(result.pipelineStartPhase, "structured_outline");
+  assert.notEqual(result.pipelineStartPhase, "volume_strategy");
+  assert.equal(result.pipelineScope, `volume:${result.resumeTargetVolumeId}`);
+  assert.equal(result.pipelineVolumeId, result.resumeTargetVolumeId);
+  assert.equal(result.taskStatus, "running");
+  assert.match(result.taskStage ?? "", /节奏|结构化大纲/);
+  assert.equal(result.taskItemKey, "beat_sheet");
+  assert.equal(result.resumeTargetStage, "structured");
 });

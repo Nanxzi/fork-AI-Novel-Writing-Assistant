@@ -42,7 +42,6 @@ export function useDirectorChapterTitleRepair(options: DirectorChapterTitleRepai
         queryClient.invalidateQueries({ queryKey: ["tasks"] }),
         novelId ? queryClient.invalidateQueries({ queryKey: queryKeys.novels.autoDirectorTask(novelId) }) : Promise.resolve(),
         novelId ? queryClient.invalidateQueries({ queryKey: queryKeys.novels.detail(novelId) }) : Promise.resolve(),
-        novelId ? queryClient.invalidateQueries({ queryKey: queryKeys.novels.volumeWorkspace(novelId) }) : Promise.resolve(),
       ]);
       if (options.navigateOnSuccess !== false && warning.route) {
         navigate(warning.route);

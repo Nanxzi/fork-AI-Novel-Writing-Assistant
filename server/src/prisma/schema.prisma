@@ -3,7 +3,7 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
 }
 
 enum ChapterGenerationState {
@@ -321,6 +321,7 @@ model Novel {
   styleTone         String?
   emotionIntensity  EmotionIntensity?
   aiFreedom         AIFreedom?
+  postGenerationStyleReviewEnabled Boolean @default(true)
   defaultChapterLength Int?
   estimatedChapterCount Int?
   projectStatus     ProjectProgressStatus? @default(not_started)
@@ -350,6 +351,8 @@ model Novel {
   continuationBookAnalysis BookAnalysis? @relation("NovelContinuationBookAnalysis", fields: [continuationBookAnalysisId], references: [id], onDelete: SetNull)
   chapters          Chapter[]
   characters        Character[]
+  characterLibraryLinks CharacterLibraryLink[]
+  characterSyncProposals CharacterSyncProposal[]
   characterRelations CharacterRelation[]
   characterCastOptions CharacterCastOption[]
   characterTimelines CharacterTimeline[]
@@ -357,6 +360,8 @@ model Novel {
   characterVolumeAssignments CharacterVolumeAssignment[]
   characterFactionTracks CharacterFactionTrack[]
   characterRelationStages CharacterRelationStage[]
+  characterResourceItems CharacterResourceLedgerItem[]
+  characterResourceEvents CharacterResourceEvent[]
   bible             NovelBible?
   plotBeats         PlotBeat[]
   chapterSummaries  ChapterSummary[]
@@ -376,10 +381,21 @@ model Novel {
   stateChangeProposals StateChangeProposal[]
   openConflicts      OpenConflict[]
   payoffLedgerItems  PayoffLedgerItem[]
+  artifactSyncCheckpoints ChapterArtifactSyncCheckpoint[]
   storyPlans         StoryPlan[]
   replanRuns         ReplanRun[]
   auditReports       AuditReport[]
   workflowTasks      NovelWorkflowTask[]
+  autoApprovalRecords AutoDirectorAutoApprovalRecord[]
+  directorRuns       DirectorRun[]
+  directorCommands   DirectorRunCommand[]
+  directorEvents     DirectorEvent[]
+  directorArtifacts  DirectorArtifact[]
+  directorLlmUsageRecords DirectorLlmUsageRecord[]
+  promptAddendums    PromptAddendum[]
+  imageTasks         ImageGenerationTask[]
+  imageAssets        ImageAsset[]
+  sideEffectJobs     NovelSideEffectJob[]
   createdAt          DateTime    @default(now())
   updatedAt         DateTime    @updatedAt
 
@@ -391,6 +407,23 @@ model Novel {
   @@index([sourceNovelId])
   @@index([sourceKnowledgeDocumentId])
   @@index([continuationBookAnalysisId])
+}
+
+model PromptAddendum {
+  id        String   @id @default(cuid())
+  scope     String
+  novelId   String?
+  promptId  String
+  title     String
+  content   String
+  enabled   Boolean  @default(true)
+  novel     Novel?   @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([scope, promptId, enabled])
+  @@index([novelId, promptId, enabled])
+  @@index([updatedAt])
 }
 
 model CreativeDecision {
@@ -464,10 +497,35 @@ model Chapter {
   payoffLedgerLastTouchedItems PayoffLedgerItem[] @relation("PayoffLedgerLastTouchedChapter")
   payoffLedgerSetupItems PayoffLedgerItem[] @relation("PayoffLedgerSetupChapter")
   payoffLedgerPayoffItems PayoffLedgerItem[] @relation("PayoffLedgerPayoffChapter")
+  introducedCharacterResources CharacterResourceLedgerItem[] @relation("CharacterResourceIntroducedChapter")
+  lastTouchedCharacterResources CharacterResourceLedgerItem[] @relation("CharacterResourceLastTouchedChapter")
+  characterResourceEvents CharacterResourceEvent[]
+  artifactSyncCheckpoints ChapterArtifactSyncCheckpoint[]
+  volumeChapterPlans VolumeChapterPlan[]
   createdAt       DateTime               @default(now())
   updatedAt       DateTime               @updatedAt
 
   @@index([novelId, order])
+}
+
+model ChapterArtifactSyncCheckpoint {
+  id           String   @id @default(cuid())
+  novelId      String
+  chapterId    String
+  contentHash  String
+  artifactType String
+  syncMode     String
+  status       String   @default("succeeded")
+  sourceType   String?
+  sourceStage  String?
+  metadataJson String?
+  novel        Novel    @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  chapter      Chapter  @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([novelId, chapterId, contentHash, artifactType, syncMode])
+  @@index([novelId, chapterId, artifactType, updatedAt])
 }
 
 model Character {
@@ -481,6 +539,14 @@ model Character {
   personality     String?
   background      String?
   development     String?
+  identityLabel   String?
+  factionLabel    String?
+  stanceLabel     String?
+  powerLevel      String?
+  realm           String?
+  currentLocation String?
+  availability    String?
+  prohibitionsJson String @default("[]")
   outerGoal       String?
   innerNeed       String?
   fear            String?
@@ -489,6 +555,12 @@ model Character {
   secret          String?
   moralLine       String?
   firstImpression String?
+  appearance      String?
+  physique        String?
+  attireStyle     String?
+  signatureDetail String?
+  voiceTexture    String?
+  presenceImpression String?
   arcStart        String?
   arcMidpoint     String?
   arcClimax       String?
@@ -499,6 +571,7 @@ model Character {
   novelId         String
   novel           Novel    @relation(fields: [novelId], references: [id], onDelete: Cascade)
   baseCharacterId String?
+  libraryLink     CharacterLibraryLink?
   timelines       CharacterTimeline[]
   matchedCandidates CharacterCandidate[] @relation("CharacterCandidateMatchedCharacter")
   volumeAssignments CharacterVolumeAssignment[]
@@ -510,6 +583,12 @@ model Character {
   incomingRelations RelationState[] @relation("RelationStateTarget")
   outgoingCharacterRelations CharacterRelation[] @relation("CharacterRelationSource")
   incomingCharacterRelations CharacterRelation[] @relation("CharacterRelationTarget")
+  ownedResourceItems CharacterResourceLedgerItem[] @relation("CharacterResourceOwner")
+  heldResourceItems CharacterResourceLedgerItem[] @relation("CharacterResourceHolder")
+  actedResourceEvents CharacterResourceEvent[] @relation("CharacterResourceEventActor")
+  fromResourceEvents CharacterResourceEvent[] @relation("CharacterResourceEventFromHolder")
+  toResourceEvents CharacterResourceEvent[] @relation("CharacterResourceEventToHolder")
+  syncProposals   CharacterSyncProposal[]
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
@@ -575,6 +654,17 @@ model CharacterCastOptionMember {
   relationToProtagonist String?
   storyFunction         String
   shortDescription      String?
+  personality           String?
+  background            String?
+  development           String?
+  identityLabel         String?
+  factionLabel          String?
+  stanceLabel           String?
+  powerLevel            String?
+  realm                 String?
+  currentLocation       String?
+  availability          String?
+  prohibitionsJson      String @default("[]")
   outerGoal             String?
   innerNeed             String?
   fear                  String?
@@ -741,16 +831,89 @@ model BaseCharacter {
   keyEvents   String?
   tags        String   @default("")
   category    String
+  revisions   BaseCharacterRevision[]
+  libraryLinks CharacterLibraryLink[]
+  syncProposals CharacterSyncProposal[]
   imageTasks  ImageGenerationTask[]
   imageAssets ImageAsset[]
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 }
 
+model BaseCharacterRevision {
+  id              String   @id @default(cuid())
+  baseCharacterId String
+  version         Int
+  snapshotJson    String
+  changeSummary   String?
+  sourceType      String   @default("manual")
+  sourceRefId     String?
+  baseCharacter   BaseCharacter @relation(fields: [baseCharacterId], references: [id], onDelete: Cascade)
+  libraryLinks    CharacterLibraryLink[]
+  syncProposals   CharacterSyncProposal[]
+  createdAt       DateTime @default(now())
+
+  @@unique([baseCharacterId, version])
+  @@index([baseCharacterId, createdAt])
+}
+
+model CharacterLibraryLink {
+  id                String   @id @default(cuid())
+  novelId           String
+  characterId       String   @unique
+  baseCharacterId   String
+  baseRevisionId    String?
+  syncPolicy        String   @default("manual_review")
+  linkStatus        String   @default("linked")
+  localOverridesJson String?
+  lastSyncedAt      DateTime?
+  novel             Novel    @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  character         Character @relation(fields: [characterId], references: [id], onDelete: Cascade)
+  baseCharacter     BaseCharacter @relation(fields: [baseCharacterId], references: [id], onDelete: Cascade)
+  baseRevision      BaseCharacterRevision? @relation(fields: [baseRevisionId], references: [id], onDelete: SetNull)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([novelId, linkStatus, updatedAt])
+  @@index([baseCharacterId, linkStatus, updatedAt])
+  @@index([baseRevisionId])
+}
+
+model CharacterSyncProposal {
+  id                String   @id @default(cuid())
+  novelId           String?
+  characterId       String?
+  baseCharacterId   String?
+  baseRevisionId    String?
+  direction         String
+  status            String   @default("pending_review")
+  confidence        Float?
+  summary           String
+  payloadJson       String
+  safeUpdatesJson   String?
+  novelOnlyUpdatesJson String?
+  riskyUpdatesJson  String?
+  recommendedAction String?
+  sourceType        String   @default("manual")
+  sourceRefId       String?
+  novel             Novel?   @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  character         Character? @relation(fields: [characterId], references: [id], onDelete: SetNull)
+  baseCharacter     BaseCharacter? @relation(fields: [baseCharacterId], references: [id], onDelete: Cascade)
+  baseRevision      BaseCharacterRevision? @relation(fields: [baseRevisionId], references: [id], onDelete: SetNull)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([novelId, status, updatedAt])
+  @@index([characterId, status, updatedAt])
+  @@index([baseCharacterId, status, updatedAt])
+  @@index([baseRevisionId])
+}
+
 model ImageGenerationTask {
   id              String            @id @default(cuid())
   sceneType       ImageSceneType    @default(character)
   baseCharacterId String?
+  novelId         String?
   provider        String
   model           String
   prompt          String
@@ -773,12 +936,58 @@ model ImageGenerationTask {
   startedAt       DateTime?
   finishedAt      DateTime?
   baseCharacter   BaseCharacter?    @relation(fields: [baseCharacterId], references: [id], onDelete: Cascade)
+  novel           Novel?            @relation(fields: [novelId], references: [id], onDelete: Cascade)
   assets          ImageAsset[]
   createdAt       DateTime          @default(now())
   updatedAt       DateTime          @updatedAt
 
   @@index([sceneType, status])
   @@index([baseCharacterId, createdAt])
+  @@index([novelId, createdAt])
+}
+
+model StyleExtractionTask {
+  id                    String            @id @default(cuid())
+  name                  String
+  category              String?
+    sourceText            String
+    sourceType            String            @default("from_text")
+    sourceRefId           String?
+    sourceProcessingMode  String            @default("full_text")
+    sourceInputText       String?
+    sourceInputCharLimit  Int?
+    sourceInputCharCount  Int?
+    provider              String
+  model                 String?
+  temperature           Float?
+  presetKey             String            @default("balanced")
+  status                PipelineJobStatus @default(queued)
+  progress              Float             @default(0)
+  retryCount            Int               @default(0)
+  maxRetries            Int               @default(1)
+  pendingManualRecovery Boolean           @default(false)
+  heartbeatAt           DateTime?
+  currentStage          String?
+  currentItemKey        String?
+  currentItemLabel      String?
+  cancelRequestedAt     DateTime?
+  error                 String?
+  summary               String?
+  createdStyleProfileId String?
+  createdStyleProfileName String?
+  startedAt             DateTime?
+  finishedAt            DateTime?
+  promptTokens          Int               @default(0)
+  completionTokens      Int               @default(0)
+  totalTokens           Int               @default(0)
+  llmCallCount          Int               @default(0)
+  lastTokenRecordedAt   DateTime?
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+
+  @@index([status, updatedAt])
+  @@index([createdStyleProfileId])
+  @@index([sourceType, sourceRefId])
 }
 
 model ImageAsset {
@@ -786,6 +995,7 @@ model ImageAsset {
   taskId          String
   sceneType       ImageSceneType    @default(character)
   baseCharacterId String?
+  novelId         String?
   provider        String
   model           String
   url             String
@@ -799,12 +1009,14 @@ model ImageAsset {
   metadata        String?
   task            ImageGenerationTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
   baseCharacter   BaseCharacter?    @relation(fields: [baseCharacterId], references: [id], onDelete: Cascade)
+  novel           Novel?            @relation(fields: [novelId], references: [id], onDelete: Cascade)
   createdAt       DateTime          @default(now())
   updatedAt       DateTime          @updatedAt
 
   @@index([taskId])
   @@index([sceneType, createdAt])
   @@index([baseCharacterId, isPrimary, createdAt])
+  @@index([novelId, isPrimary, createdAt])
 }
 
 model NovelGenre {
@@ -977,6 +1189,9 @@ model StyleProfile {
   sourceRefId        String?
   sourceContent      String?
   extractedFeaturesJson String?
+  extractionPresetsJson String?
+  extractionAntiAiRuleKeysJson String?
+  selectedExtractionPresetKey String?
   analysisMarkdown   String?
   narrativeRulesJson String?
   characterRulesJson String?
@@ -1022,11 +1237,13 @@ model AntiAiRule {
   promptInstruction String?
   autoRewrite      Boolean        @default(false)
   enabled          Boolean        @default(true)
+  globalBaselineEnabled Boolean   @default(false)
   profileBindings  StyleProfileAntiAiRule[]
   createdAt        DateTime       @default(now())
   updatedAt        DateTime       @updatedAt
 
   @@index([type, enabled])
+  @@index([globalBaselineEnabled, enabled])
 }
 
 model StyleProfileAntiAiRule {
@@ -1081,6 +1298,8 @@ model APIKey {
   baseURL   String?
   isActive  Boolean  @default(true)
   reasoningEnabled Boolean @default(true)
+  concurrencyLimit Int @default(0)
+  requestIntervalMs Int @default(0)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -1095,14 +1314,18 @@ model AppSetting {
 }
 
 model ModelRouteConfig {
-  id          String  @id @default(cuid())
-  taskType    String  @unique
-  provider    String
-  model       String
-  temperature Float   @default(0.7)
-  maxTokens   Int?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id                       String  @id @default(cuid())
+  taskType                 String  @unique
+  provider                 String
+  model                    String
+  temperature              Float   @default(0.7)
+  maxTokens                Int?
+  requestProtocol          String  @default("auto")
+  structuredResponseFormat String  @default("auto")
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
+
+  @@index([provider])
 }
 
 model NovelBible {
@@ -1351,6 +1574,7 @@ model VolumePlanVersion {
 
   @@unique([novelId, version])
   @@index([novelId, status, createdAt])
+  @@index([novelId, status, version])
 }
 
 model VolumePlan {
@@ -1385,6 +1609,7 @@ model VolumePlan {
 model VolumeChapterPlan {
   id              String     @id @default(cuid())
   volumeId        String
+  chapterId       String?
   chapterOrder    Int
   title           String
   summary         String
@@ -1397,11 +1622,13 @@ model VolumeChapterPlan {
   sceneCards      String?
   payoffRefsJson  String?
   volume          VolumePlan @relation(fields: [volumeId], references: [id], onDelete: Cascade)
+  chapter         Chapter?   @relation(fields: [chapterId], references: [id], onDelete: SetNull)
   createdAt       DateTime   @default(now())
   updatedAt       DateTime   @updatedAt
 
   @@unique([volumeId, chapterOrder])
   @@index([volumeId, chapterOrder])
+  @@index([chapterId])
 }
 
 model QualityReport {
@@ -1486,12 +1713,404 @@ model NovelWorkflowTask {
   llmCallCount       Int                     @default(0)
   lastTokenRecordedAt DateTime?
   novel              Novel?                  @relation(fields: [novelId], references: [id], onDelete: SetNull)
+  autoApprovalRecords AutoDirectorAutoApprovalRecord[]
+  directorRun        DirectorRun?
+  directorCommands   DirectorRunCommand[]
+  directorSteps      DirectorStepRun[]
+  directorEvents     DirectorEvent[]
+  directorArtifacts  DirectorArtifact[]
+  directorLlmUsageRecords DirectorLlmUsageRecord[]
   createdAt          DateTime                @default(now())
   updatedAt          DateTime                @updatedAt
 
   @@index([novelId, status, updatedAt])
   @@index([status, updatedAt])
   @@index([lane, updatedAt])
+}
+
+model DirectorRunCommand {
+  id              String             @id @default(cuid())
+  taskId          String
+  novelId         String?
+  commandType     String
+  idempotencyKey  String
+  status          String             @default("queued")
+  leaseOwner      String?
+  leaseExpiresAt  DateTime?
+  attempt         Int                @default(0)
+  runAfter        DateTime           @default(now())
+  payloadJson     String?
+  errorMessage    String?
+  startedAt       DateTime?
+  finishedAt      DateTime?
+  task            NovelWorkflowTask  @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  novel           Novel?             @relation(fields: [novelId], references: [id], onDelete: SetNull)
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+
+  @@unique([taskId, commandType, idempotencyKey])
+  @@index([status, runAfter, updatedAt])
+  @@index([taskId, status, updatedAt])
+  @@index([novelId, updatedAt])
+  @@index([leaseOwner, leaseExpiresAt])
+}
+
+model DirectorRuntimeInstance {
+  id                String   @id @default(cuid())
+  novelId           String?
+  workflowTaskId    String?
+  runId             String?
+  runMode           String?
+  status            String   @default("waiting_worker")
+  currentStep       String?
+  currentChapterId  String?
+  checkpointVersion Int      @default(0)
+  cancelRequestedAt DateTime?
+  lastHeartbeatAt   DateTime?
+  lastErrorClass    String?
+  lastErrorMessage  String?
+  workerMessage     String?
+  metadataJson      String?
+  commands          DirectorRuntimeCommand[]
+  executions        DirectorRuntimeExecution[]
+  checkpoints       DirectorRuntimeCheckpoint[]
+  events            DirectorRuntimeEvent[]
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([novelId, status, updatedAt])
+  @@index([workflowTaskId])
+  @@index([runId])
+  @@index([status, updatedAt])
+}
+
+model DirectorRuntimeCommand {
+  id              String   @id @default(cuid())
+  runtimeId       String
+  workflowTaskId  String?
+  novelId         String?
+  legacyCommandId String?  @unique
+  commandType     String
+  idempotencyKey  String
+  status          String   @default("queued")
+  priority        Int      @default(50)
+  runAfter        DateTime @default(now())
+  leaseOwner      String?
+  leaseExpiresAt  DateTime?
+  attempt         Int      @default(0)
+  payloadJson     String?
+  errorMessage    String?
+  startedAt       DateTime?
+  finishedAt      DateTime?
+  runtime         DirectorRuntimeInstance @relation(fields: [runtimeId], references: [id], onDelete: Cascade)
+  executions      DirectorRuntimeExecution[]
+  checkpoints     DirectorRuntimeCheckpoint[]
+  events          DirectorRuntimeEvent[]
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([runtimeId, commandType, idempotencyKey])
+  @@index([runtimeId, status, updatedAt])
+  @@index([status, priority, runAfter, createdAt])
+  @@index([workflowTaskId, status, updatedAt])
+  @@index([novelId, status, updatedAt])
+  @@index([leaseOwner, leaseExpiresAt])
+}
+
+model DirectorRuntimeExecution {
+  id                String   @id @default(cuid())
+  runtimeId         String
+  commandId         String?
+  workflowTaskId    String?
+  novelId           String?
+  legacyCommandId   String?
+  activeLockKey     String?  @unique
+  workerId          String?
+  slotId            String?
+  status            String   @default("leased")
+  stepType          String
+  resourceClass     String?
+  leaseExpiresAt    DateTime?
+  heartbeatAt       DateTime?
+  startedAt         DateTime?
+  finishedAt        DateTime?
+  errorClass        String?
+  errorMessage      String?
+  inputHash         String?
+  checkpointVersion Int      @default(0)
+  runtime           DirectorRuntimeInstance @relation(fields: [runtimeId], references: [id], onDelete: Cascade)
+  command           DirectorRuntimeCommand? @relation(fields: [commandId], references: [id], onDelete: SetNull)
+  checkpoints       DirectorRuntimeCheckpoint[]
+  events            DirectorRuntimeEvent[]
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([runtimeId, status, updatedAt])
+  @@index([status, leaseExpiresAt])
+  @@index([workflowTaskId, status, updatedAt])
+  @@index([novelId, status, updatedAt])
+  @@index([workerId, status, updatedAt])
+}
+
+model DirectorRuntimeCheckpoint {
+  id                String   @id @default(cuid())
+  runtimeId         String
+  commandId         String?
+  executionId       String?
+  version           Int
+  stepType          String
+  targetType        String?
+  targetId          String?
+  inputHash         String?
+  outputRefJson     String?
+  stateJson         String?
+  summary           String?
+  runtime           DirectorRuntimeInstance @relation(fields: [runtimeId], references: [id], onDelete: Cascade)
+  command           DirectorRuntimeCommand? @relation(fields: [commandId], references: [id], onDelete: SetNull)
+  execution         DirectorRuntimeExecution? @relation(fields: [executionId], references: [id], onDelete: SetNull)
+  createdAt         DateTime @default(now())
+
+  @@unique([runtimeId, version])
+  @@index([runtimeId, createdAt])
+  @@index([commandId])
+  @@index([executionId])
+}
+
+model DirectorRuntimeEvent {
+  id          String   @id
+  runtimeId   String
+  commandId   String?
+  executionId String?
+  workflowTaskId String?
+  novelId     String?
+  type        String
+  summary     String
+  severity    String?
+  metadataJson String?
+  occurredAt  DateTime
+  runtime     DirectorRuntimeInstance @relation(fields: [runtimeId], references: [id], onDelete: Cascade)
+  command     DirectorRuntimeCommand? @relation(fields: [commandId], references: [id], onDelete: SetNull)
+  execution   DirectorRuntimeExecution? @relation(fields: [executionId], references: [id], onDelete: SetNull)
+  createdAt   DateTime @default(now())
+
+  @@index([runtimeId, occurredAt])
+  @@index([commandId, occurredAt])
+  @@index([executionId, occurredAt])
+  @@index([workflowTaskId, occurredAt])
+  @@index([novelId, occurredAt])
+  @@index([type, occurredAt])
+}
+
+model DirectorRun {
+  id                         String             @id
+  taskId                     String             @unique
+  novelId                    String?
+  entrypoint                 String?
+  policyJson                 String
+  lastWorkspaceAnalysisJson  String?
+  task                       NovelWorkflowTask  @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  novel                      Novel?             @relation(fields: [novelId], references: [id], onDelete: SetNull)
+  steps                      DirectorStepRun[]
+  events                     DirectorEvent[]
+  artifacts                  DirectorArtifact[]
+  llmUsageRecords            DirectorLlmUsageRecord[]
+  createdAt                  DateTime           @default(now())
+  updatedAt                  DateTime           @updatedAt
+
+  @@index([novelId, updatedAt])
+}
+
+model DirectorStepRun {
+  id                    String            @id @default(cuid())
+  runId                 String
+  taskId                String
+  novelId               String?
+  idempotencyKey        String            @unique
+  nodeKey               String
+  label                 String
+  status                String
+  targetType            String?
+  targetId              String?
+  startedAt             DateTime
+  finishedAt            DateTime?
+  error                 String?
+  producedArtifactsJson String?
+  policyDecisionJson    String?
+  run                   DirectorRun       @relation(fields: [runId], references: [id], onDelete: Cascade)
+  task                  NovelWorkflowTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  llmUsageRecords       DirectorLlmUsageRecord[]
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+
+  @@index([runId, status, updatedAt])
+  @@index([taskId, nodeKey])
+  @@index([novelId, updatedAt])
+}
+
+model DirectorLlmUsageRecord {
+  id                   String             @id @default(cuid())
+  novelId              String?
+  taskId               String?
+  runId                String?
+  stepIdempotencyKey   String?
+  nodeKey              String?
+  promptAssetKey       String?
+  promptVersion        String?
+  modelRoute           String?
+  provider             String?
+  model                String?
+  status               String             @default("recorded")
+  attributionStatus    String             @default("unattributed")
+  durationMs           Int?
+  promptTokens         Int                @default(0)
+  completionTokens     Int                @default(0)
+  totalTokens          Int                @default(0)
+  metadataJson         String?
+  recordedAt           DateTime           @default(now())
+  novel                Novel?             @relation(fields: [novelId], references: [id], onDelete: SetNull)
+  task                 NovelWorkflowTask? @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  run                  DirectorRun?       @relation(fields: [runId], references: [id], onDelete: SetNull)
+  step                 DirectorStepRun?   @relation(fields: [stepIdempotencyKey], references: [idempotencyKey], onDelete: SetNull)
+  createdAt            DateTime           @default(now())
+
+  @@index([novelId, recordedAt])
+  @@index([taskId, recordedAt])
+  @@index([runId, recordedAt])
+  @@index([stepIdempotencyKey, recordedAt])
+  @@index([nodeKey, recordedAt])
+  @@index([attributionStatus, recordedAt])
+}
+
+model DirectorEvent {
+  id             String             @id
+  runId          String?
+  taskId         String?
+  novelId        String?
+  type           String
+  nodeKey        String?
+  artifactId     String?
+  artifactType   String?
+  summary        String
+  affectedScope  String?
+  severity       String?
+  metadataJson   String?
+  occurredAt     DateTime
+  run            DirectorRun?       @relation(fields: [runId], references: [id], onDelete: Cascade)
+  task           NovelWorkflowTask? @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  novel          Novel?             @relation(fields: [novelId], references: [id], onDelete: SetNull)
+  createdAt      DateTime           @default(now())
+
+  @@index([runId, occurredAt])
+  @@index([taskId, occurredAt])
+  @@index([novelId, occurredAt])
+  @@index([type, occurredAt])
+}
+
+model DirectorArtifact {
+  id                   String                       @id
+  runId                String?
+  novelId              String
+  taskId               String?
+  artifactType         String
+  targetType           String
+  targetId             String?
+  version              Int                          @default(1)
+  status               String
+  source               String
+  contentTable         String
+  contentId            String
+  contentHash          String?
+  schemaVersion        String
+  promptAssetKey       String?
+  promptVersion        String?
+  modelRoute           String?
+  sourceStepRunId      String?
+  protectedUserContent Boolean?
+  artifactUpdatedAt    DateTime?
+  run                  DirectorRun?                 @relation(fields: [runId], references: [id], onDelete: SetNull)
+  task                 NovelWorkflowTask?           @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  novel                Novel                        @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  dependencies         DirectorArtifactDependency[] @relation("DirectorArtifactDependencies")
+  dependents           DirectorArtifactDependency[] @relation("DirectorArtifactDependents")
+  createdAt            DateTime                     @default(now())
+  updatedAt            DateTime                     @updatedAt
+
+  @@index([novelId, artifactType, status])
+  @@index([runId, updatedAt])
+  @@index([taskId, updatedAt])
+  @@index([targetType, targetId])
+  @@index([sourceStepRunId])
+}
+
+model DirectorArtifactDependency {
+  id                  String           @id @default(cuid())
+  artifactId          String
+  dependsOnArtifactId String
+  dependsOnVersion    Int?
+  artifact            DirectorArtifact @relation("DirectorArtifactDependencies", fields: [artifactId], references: [id], onDelete: Cascade)
+  dependsOn           DirectorArtifact @relation("DirectorArtifactDependents", fields: [dependsOnArtifactId], references: [id], onDelete: Cascade)
+  createdAt           DateTime         @default(now())
+
+  @@unique([artifactId, dependsOnArtifactId])
+  @@index([dependsOnArtifactId])
+}
+
+model AutoDirectorAutoApprovalRecord {
+  id                 String   @id @default(cuid())
+  taskId             String
+  novelId            String
+  approvalPointCode  String
+  approvalPointLabel String
+  checkpointType     String
+  checkpointSummary  String?
+  summary            String
+  stage              String?
+  scopeLabel         String?
+  eventId            String   @unique
+  task               NovelWorkflowTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  novel              Novel    @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  createdAt          DateTime @default(now())
+
+  @@index([novelId, createdAt])
+  @@index([taskId, createdAt])
+}
+
+
+model AutoDirectorFollowUpActionLog {
+  id             String   @id @default(cuid())
+  taskId         String
+  actionCode     String
+  sourceChannel  String
+  sourceUser     String?
+  idempotencyKey String   @unique
+  resultCode     String
+  failureReason  String?
+  metadataJson   String?
+  executedAt     DateTime @default(now())
+  createdAt      DateTime @default(now())
+
+  @@index([taskId, executedAt])
+  @@index([taskId, actionCode, executedAt])
+}
+
+model AutoDirectorFollowUpNotificationLog {
+  id             String   @id @default(cuid())
+  eventId        String
+  eventType      String
+  taskId         String
+  channelType    String
+  target         String?
+  requestPayload String?
+  responseBody   String?
+  responseStatus Int?
+  attemptCount   Int      @default(1)
+  deliveredAt    DateTime?
+  status         String
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([taskId, createdAt])
+  @@index([eventId, channelType, createdAt])
 }
 
 model StoryStateSnapshot {
@@ -1659,6 +2278,81 @@ model PayoffLedgerItem {
   @@index([lastSnapshotId])
 }
 
+model CharacterResourceLedgerItem {
+  id                           String   @id @default(cuid())
+  novelId                      String
+  resourceKey                  String
+  name                         String
+  summary                      String
+  resourceType                 String
+  narrativeFunction            String
+  ownerType                    String
+  ownerId                      String?
+  ownerName                    String?
+  ownerCharacterId             String?
+  holderCharacterId            String?
+  holderCharacterName          String?
+  status                       String
+  readerKnows                  Boolean  @default(false)
+  holderKnows                  Boolean  @default(true)
+  knownByCharacterIdsJson      String?
+  introducedChapterId          String?
+  introducedChapterOrder       Int?
+  lastTouchedChapterId         String?
+  lastTouchedChapterOrder      Int?
+  expectedUseStartChapterOrder Int?
+  expectedUseEndChapterOrder   Int?
+  constraintsJson              String?
+  riskSignalsJson              String?
+  sourceRefsJson               String?
+  evidenceJson                 String?
+  confidence                   Float?
+  novel                        Novel    @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  ownerCharacter               Character? @relation("CharacterResourceOwner", fields: [ownerCharacterId], references: [id], onDelete: SetNull)
+  holderCharacter              Character? @relation("CharacterResourceHolder", fields: [holderCharacterId], references: [id], onDelete: SetNull)
+  introducedChapter            Chapter? @relation("CharacterResourceIntroducedChapter", fields: [introducedChapterId], references: [id], onDelete: SetNull)
+  lastTouchedChapter           Chapter? @relation("CharacterResourceLastTouchedChapter", fields: [lastTouchedChapterId], references: [id], onDelete: SetNull)
+  events                       CharacterResourceEvent[]
+  createdAt                    DateTime @default(now())
+  updatedAt                    DateTime @updatedAt
+
+  @@unique([novelId, resourceKey])
+  @@index([novelId, status, updatedAt])
+  @@index([holderCharacterId, status])
+  @@index([ownerCharacterId])
+  @@index([novelId, lastTouchedChapterOrder])
+  @@index([introducedChapterId])
+  @@index([lastTouchedChapterId])
+}
+
+model CharacterResourceEvent {
+  id                    String   @id @default(cuid())
+  novelId               String
+  resourceId            String
+  chapterId             String?
+  chapterOrder          Int?
+  eventType             String
+  actorCharacterId      String?
+  fromHolderCharacterId String?
+  toHolderCharacterId   String?
+  summary               String
+  evidenceJson          String?
+  novel                 Novel    @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  resource              CharacterResourceLedgerItem @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+  chapter               Chapter? @relation(fields: [chapterId], references: [id], onDelete: SetNull)
+  actorCharacter        Character? @relation("CharacterResourceEventActor", fields: [actorCharacterId], references: [id], onDelete: SetNull)
+  fromHolderCharacter   Character? @relation("CharacterResourceEventFromHolder", fields: [fromHolderCharacterId], references: [id], onDelete: SetNull)
+  toHolderCharacter     Character? @relation("CharacterResourceEventToHolder", fields: [toHolderCharacterId], references: [id], onDelete: SetNull)
+  createdAt             DateTime @default(now())
+
+  @@index([novelId, createdAt])
+  @@index([resourceId, createdAt])
+  @@index([chapterId])
+  @@index([actorCharacterId])
+  @@index([fromHolderCharacterId])
+  @@index([toHolderCharacterId])
+}
+
 model CanonicalStateVersion {
   id                     String   @id @default(cuid())
   novelId                String
@@ -1739,6 +2433,8 @@ model StoryPlan {
   updatedAt            DateTime @updatedAt
 
   @@index([novelId, level, createdAt])
+  @@index([novelId, level, externalRef])
+  @@index([novelId, level, chapterId])
   @@index([chapterId, createdAt])
   @@index([externalRef])
   @@index([sourceStateSnapshotId])
@@ -1986,6 +2682,31 @@ model RagIndexJob {
   @@index([tenantId, ownerType, ownerId])
 }
 
+model NovelSideEffectJob {
+  id               String    @id @default(cuid())
+  novelId          String?
+  jobType          String
+  status           String    @default("pending")
+  idempotencyKey   String    @unique
+  payloadVersion   Int       @default(1)
+  payloadJson      String
+  attempts         Int       @default(0)
+  maxAttempts      Int       @default(5)
+  runAfter         DateTime  @default(now())
+  leaseOwner       String?
+  leaseExpiresAt   DateTime?
+  lastError        String?
+  finishedAt       DateTime?
+  novel            Novel?    @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@index([status, runAfter])
+  @@index([novelId, status, updatedAt])
+  @@index([leaseOwner, leaseExpiresAt])
+  @@index([jobType, status, runAfter])
+}
+
 model TaskCenterArchive {
   id         String   @id @default(cuid())
   taskKind   String
@@ -1994,4 +2715,113 @@ model TaskCenterArchive {
 
   @@unique([taskKind, taskId])
   @@index([taskKind, archivedAt])
+}
+
+model StoryTimelineEvent {
+  id                   String   @id @default(cuid())
+  novelId              String
+  chapterId            String?
+  chapterIndex         Int?
+  eventOrder           Int
+  storyDayIndex        Int?
+  storyTimeLabel       String?
+  title                String
+  summary              String
+  type                 String
+  status               String
+  visibility           String
+  source               String
+  participantIdsJson   String   @default("[]")
+  locationId           String?
+  factionIdsJson       String   @default("[]")
+  prerequisiteIdsJson  String   @default("[]")
+  consequenceIdsJson   String   @default("[]")
+  stateChangesJson     String   @default("[]")
+  eventKey             String?
+  confidence           Float    @default(1)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  @@index([novelId, chapterIndex])
+  @@index([novelId, eventOrder])
+  @@index([novelId, status])
+  @@index([novelId, eventKey])
+}
+
+model ChapterTimeAnchor {
+  id                   String   @id @default(cuid())
+  novelId              String
+  chapterId            String
+  chapterIndex         Int
+  storyDayIndex        Int?
+  timeLabel            String
+  startsAfterIdsJson   String   @default("[]")
+  plannedEventIdsJson  String   @default("[]")
+  endedWithIdsJson     String   @default("[]")
+  previousHookIdsJson  String   @default("[]")
+  nextHookIdsJson      String   @default("[]")
+  forbiddenEventIdsJson String  @default("[]")
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  @@unique([novelId, chapterId])
+  @@index([novelId, chapterIndex])
+}
+
+model TimelineHook {
+  id                            String   @id @default(cuid())
+  novelId                       String
+  createdInChapterId            String
+  createdInChapterIndex         Int
+  expectedResolveByChapterIndex Int?
+  resolveMode                   String   @default("long_arc")
+  blocking                      Boolean  @default(false)
+  resolvedInChapterId           String?
+  resolvedInChapterIndex        Int?
+  title                         String
+  description                   String
+  status                        String
+  priority                      String
+  relatedEventIdsJson           String   @default("[]")
+  participantIdsJson            String   @default("[]")
+  createdAt                     DateTime @default(now())
+  updatedAt                     DateTime @updatedAt
+
+  @@index([novelId, status])
+  @@index([novelId, resolveMode, blocking])
+  @@index([novelId, createdInChapterIndex])
+  @@index([novelId, expectedResolveByChapterIndex])
+}
+
+model TimelineConstraint {
+  id                       String   @id @default(cuid())
+  novelId                  String
+  chapterId                String?
+  chapterIndex             Int?
+  type                     String
+  severity                 String
+  description              String
+  relatedEventIdsJson      String   @default("[]")
+  relatedHookIdsJson       String   @default("[]")
+  relatedCharacterIdsJson  String   @default("[]")
+  active                   Boolean  @default(true)
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
+
+  @@index([novelId, chapterIndex])
+  @@index([novelId, active])
+}
+
+model TimelineCheckReport {
+  id           String   @id @default(cuid())
+  novelId      String
+  chapterId    String
+  chapterIndex Int
+  status       String
+  score        Float
+  issuesJson   String   @default("[]")
+  createdAt    DateTime @default(now())
+
+  @@index([novelId, chapterIndex])
+  @@index([novelId, status])
 }

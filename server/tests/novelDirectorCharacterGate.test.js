@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 
 const {
   runDirectorCharacterSetupPhase,
-} = require("../dist/services/novel/director/novelDirectorPipelinePhases.js");
+} = require("../dist/services/novel/director/phases/novelDirectorPipelinePhases.js");
 
 function buildRequest(runMode = "auto_to_ready") {
   return {
@@ -35,6 +35,46 @@ function buildRequest(runMode = "auto_to_ready") {
       toneKeywords: ["历史", "权谋", "身份反转"],
       targetChapterCount: 120,
     },
+  };
+}
+
+function buildCastOption(overrides = {}) {
+  return {
+    id: "cast_ready",
+    title: "Ready cast",
+    summary: "A reusable cast option.",
+    whyItWorks: "It already fits the story.",
+    recommendedReason: "Reuse existing work.",
+    status: "draft",
+    sourceStoryInput: null,
+    members: [
+      {
+        id: "member_1",
+        optionId: "cast_ready",
+        sortOrder: 0,
+        name: "Lin Qing",
+        role: "protagonist",
+        gender: "unknown",
+        castRole: "protagonist",
+        relationToProtagonist: "self",
+        storyFunction: "drives the central plot",
+        shortDescription: "A concrete protagonist.",
+        outerGoal: "survive",
+        innerNeed: "choose agency",
+        fear: "losing control",
+        wound: "old failure",
+        misbelief: "staying quiet is safest",
+        secret: "hidden identity",
+        moralLine: "protect innocents",
+        firstImpression: "sharp and cautious",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+    ],
+    relations: [],
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    ...overrides,
   };
 }
 
@@ -82,7 +122,7 @@ test("director character phase pauses at review checkpoint when cast quality gat
     },
   ];
 
-  const paused = await runDirectorCharacterSetupPhase({
+  const result = await runDirectorCharacterSetupPhase({
     taskId: "task_1",
     novelId: "novel_1",
     request: buildRequest(),
@@ -107,17 +147,17 @@ test("director character phase pauses at review checkpoint when cast quality gat
               autoApplicable: false,
               issues: [
                 {
-                  code: "abstract_name",
+                  code: "missing_gender",
                   optionIndex: 0,
                   optionTitle: "功能位方案",
-                  message: "角色名“谜团催化剂”仍像功能位或抽象槽位，不能直接入库。",
+                  message: "角色“谜团催化剂”缺少 gender。",
                 },
               ],
             },
           ],
           autoApplicableOptionIndex: null,
           autoApplicableOptionId: null,
-          blockingReasons: ["功能位方案: 角色名“谜团催化剂”仍像功能位或抽象槽位，不能直接入库。"],
+          blockingReasons: ["功能位方案: 角色“谜团催化剂”缺少 gender。"],
         }),
         applyCharacterCastOption: async () => {
           applyCalls += 1;
@@ -132,11 +172,131 @@ test("director character phase pauses at review checkpoint when cast quality gat
     },
   });
 
-  assert.equal(paused, true);
+  assert.equal(result.status, "waiting_review");
+  assert.equal(result.optionId, "cast_bad");
   assert.equal(applyCalls, 0);
   assert.equal(autoGenerateCalls, 1);
   const checkpointCall = workflowCalls.find((call) => call.type === "checkpoint");
   assert.ok(checkpointCall);
   assert.equal(checkpointCall.payload.checkpointType, "character_setup_required");
   assert.match(checkpointCall.payload.checkpointSummary, /不能直接自动应用/);
+});
+
+test("director character phase reuses an applied cast option instead of regenerating", async () => {
+  const workflowCalls = [];
+  let applyCalls = 0;
+  let autoGenerateCalls = 0;
+  let assessmentCalls = 0;
+
+  const result = await runDirectorCharacterSetupPhase({
+    taskId: "task_2",
+    novelId: "novel_1",
+    request: buildRequest(),
+    dependencies: {
+      workflowService: {
+        bootstrapTask: async (payload) => workflowCalls.push({ type: "bootstrap", payload }),
+        recordCheckpoint: async (taskId, payload) => workflowCalls.push({ type: "checkpoint", taskId, payload }),
+      },
+      novelContextService: {},
+      volumeService: {},
+      characterPreparationService: {
+        findReusableCharacterCastOption: async () => buildCastOption({ status: "applied" }),
+        generateAutoCharacterCastOption: async () => {
+          autoGenerateCalls += 1;
+          throw new Error("should not regenerate");
+        },
+        assessCharacterCastOptions: () => {
+          assessmentCalls += 1;
+          return {
+            options: [],
+            autoApplicableOptionIndex: null,
+            autoApplicableOptionId: null,
+            blockingReasons: [],
+          };
+        },
+        applyCharacterCastOption: async () => {
+          applyCalls += 1;
+        },
+      },
+    },
+    callbacks: {
+      buildDirectorSeedPayload: (_request, novelId, extra) => ({ novelId, ...extra }),
+      markDirectorTaskRunning: async (taskId, stage, itemKey, itemLabel) => {
+        workflowCalls.push({ type: "running", taskId, stage, itemKey, itemLabel });
+      },
+    },
+  });
+
+  assert.equal(result.status, "already_applied");
+  assert.equal(autoGenerateCalls, 0);
+  assert.equal(assessmentCalls, 0);
+  assert.equal(applyCalls, 0);
+  assert.ok(workflowCalls.some((call) => call.type === "running" && /复用可直接使用的角色阵容/.test(call.itemLabel)));
+  assert.equal(workflowCalls.some((call) => call.type === "checkpoint"), false);
+});
+
+test("director character phase applies an existing draft cast option without regenerating", async () => {
+  const workflowCalls = [];
+  let applyCalls = 0;
+  const applyArgs = [];
+  let autoGenerateCalls = 0;
+  const draftOption = buildCastOption({ id: "cast_draft", status: "draft" });
+
+  const result = await runDirectorCharacterSetupPhase({
+    taskId: "task_3",
+    novelId: "novel_1",
+    request: buildRequest(),
+    dependencies: {
+      workflowService: {
+        bootstrapTask: async (payload) => workflowCalls.push({ type: "bootstrap", payload }),
+        recordCheckpoint: async (taskId, payload) => workflowCalls.push({ type: "checkpoint", taskId, payload }),
+      },
+      novelContextService: {},
+      volumeService: {},
+      characterPreparationService: {
+        findReusableCharacterCastOption: async () => draftOption,
+        generateAutoCharacterCastOption: async () => {
+          autoGenerateCalls += 1;
+          throw new Error("should not regenerate");
+        },
+        assessCharacterCastOptions: () => ({
+          options: [
+            {
+              optionIndex: 0,
+              optionId: draftOption.id,
+              title: draftOption.title,
+              autoApplicable: true,
+              issues: [],
+            },
+          ],
+          autoApplicableOptionIndex: 0,
+          autoApplicableOptionId: draftOption.id,
+          blockingReasons: [],
+        }),
+        applyCharacterCastOption: async (...args) => {
+          applyCalls += 1;
+          applyArgs.push(args);
+        },
+      },
+    },
+    callbacks: {
+      buildDirectorSeedPayload: (_request, novelId, extra) => ({ novelId, ...extra }),
+      markDirectorTaskRunning: async (taskId, stage, itemKey, itemLabel) => {
+        workflowCalls.push({ type: "running", taskId, stage, itemKey, itemLabel });
+      },
+    },
+  });
+
+  assert.equal(result.status, "applied");
+  assert.equal(autoGenerateCalls, 0);
+  assert.equal(applyCalls, 1);
+  assert.deepEqual(applyArgs[0]?.[2], {
+    visibleProfileGeneration: {
+      provider: "deepseek",
+      model: "deepseek-chat",
+      temperature: 0.5,
+    },
+  });
+  assert.ok(workflowCalls.some((call) => call.type === "running" && /复用候选角色阵容/.test(call.itemLabel)));
+  assert.equal(workflowCalls.some((call) => call.type === "checkpoint"), false);
 });

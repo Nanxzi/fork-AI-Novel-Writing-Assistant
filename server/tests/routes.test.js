@@ -4,13 +4,17 @@ const http = require("node:http");
 const { createApp } = require("../dist/app.js");
 const { AgentTraceStore } = require("../dist/agents/traceStore.js");
 const { creativeHubLangGraph } = require("../dist/creativeHub/CreativeHubLangGraph.js");
+const { creativeHubInterruptLangGraph } = require("../dist/creativeHub/CreativeHubInterruptLangGraph.js");
 const { creativeHubService } = require("../dist/creativeHub/CreativeHubService.js");
 const { llmConnectivityService } = require("../dist/llm/connectivity.js");
 const structuredFallbackSettings = require("../dist/llm/structuredFallbackSettings.js");
-const { NovelService } = require("../dist/services/novel/NovelService.js");
+const {
+  DefaultNovelApplicationServices,
+} = require("../dist/services/novel/application/NovelApplicationServices.js");
 const { NovelFramingSuggestionService } = require("../dist/services/novel/NovelFramingSuggestionService.js");
 const { ragServices } = require("../dist/services/rag/index.js");
 const { providerBalanceService } = require("../dist/services/settings/ProviderBalanceService.js");
+const { STYLE_EXTRACTION_TIMEOUT_MS_KEY } = require("../dist/services/settings/StyleEngineRuntimeSettingsService.js");
 const { prisma } = require("../dist/db/prisma.js");
 
 function listen(server) {
@@ -140,6 +144,19 @@ test("PUT /api/settings/rag saves extended settings and auto-enqueues reindex", 
         embeddingTimeoutMs: current.embeddingTimeoutMs,
         embeddingMaxRetries: current.embeddingMaxRetries,
         embeddingRetryBaseMs: current.embeddingRetryBaseMs,
+        enabled: current.enabled,
+        qdrantUrl: current.qdrantUrl,
+        qdrantTimeoutMs: current.qdrantTimeoutMs,
+        qdrantUpsertMaxBytes: current.qdrantUpsertMaxBytes,
+        chunkSize: current.chunkSize,
+        chunkOverlap: current.chunkOverlap,
+        vectorCandidates: current.vectorCandidates,
+        keywordCandidates: current.keywordCandidates,
+        finalTopK: current.finalTopK,
+        workerPollMs: current.workerPollMs,
+        workerMaxAttempts: current.workerMaxAttempts,
+        workerRetryBaseMs: current.workerRetryBaseMs,
+        httpTimeoutMs: current.httpTimeoutMs,
       }),
     });
     assert.equal(response.status, 200);
@@ -165,10 +182,77 @@ test("PUT /api/settings/rag saves extended settings and auto-enqueues reindex", 
         embeddingTimeoutMs: current.embeddingTimeoutMs,
         embeddingMaxRetries: current.embeddingMaxRetries,
         embeddingRetryBaseMs: current.embeddingRetryBaseMs,
+        enabled: current.enabled,
+        qdrantUrl: current.qdrantUrl,
+        qdrantTimeoutMs: current.qdrantTimeoutMs,
+        qdrantUpsertMaxBytes: current.qdrantUpsertMaxBytes,
+        chunkSize: current.chunkSize,
+        chunkOverlap: current.chunkOverlap,
+        vectorCandidates: current.vectorCandidates,
+        keywordCandidates: current.keywordCandidates,
+        finalTopK: current.finalTopK,
+        workerPollMs: current.workerPollMs,
+        workerMaxAttempts: current.workerMaxAttempts,
+        workerRetryBaseMs: current.workerRetryBaseMs,
+        httpTimeoutMs: current.httpTimeoutMs,
       }),
     });
   } finally {
     ragServices.ragIndexService.enqueueReindex = originalEnqueueReindex;
+    ragServices.ragWorker.stop();
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test("GET and PUT /api/settings/style-engine-runtime saves style extraction timeout", async () => {
+  const originalSetting = await prisma.appSetting.findUnique({
+    where: { key: STYLE_EXTRACTION_TIMEOUT_MS_KEY },
+  });
+  const app = createApp();
+  const server = http.createServer(app);
+  const port = await listen(server);
+  try {
+    const settingsResponse = await fetch(`http://127.0.0.1:${port}/api/settings/style-engine-runtime`);
+    assert.equal(settingsResponse.status, 200);
+    const settingsPayload = await settingsResponse.json();
+    assert.equal(settingsPayload.success, true);
+    assert.equal(settingsPayload.data.defaultStyleExtractionTimeoutMs, 600000);
+    assert.equal(settingsPayload.data.minStyleExtractionTimeoutMs, 180000);
+    assert.equal(settingsPayload.data.maxStyleExtractionTimeoutMs, 1800000);
+
+    const response = await fetch(`http://127.0.0.1:${port}/api/settings/style-engine-runtime`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        styleExtractionTimeoutMs: 720000,
+      }),
+    });
+    assert.equal(response.status, 200);
+    const payload = await response.json();
+    assert.equal(payload.success, true);
+    assert.equal(payload.data.styleExtractionTimeoutMs, 720000);
+
+    const reloadResponse = await fetch(`http://127.0.0.1:${port}/api/settings/style-engine-runtime`);
+    assert.equal(reloadResponse.status, 200);
+    const reloadPayload = await reloadResponse.json();
+    assert.equal(reloadPayload.data.styleExtractionTimeoutMs, 720000);
+  } finally {
+    if (originalSetting) {
+      await prisma.appSetting.upsert({
+        where: { key: STYLE_EXTRACTION_TIMEOUT_MS_KEY },
+        update: { value: originalSetting.value },
+        create: {
+          key: STYLE_EXTRACTION_TIMEOUT_MS_KEY,
+          value: originalSetting.value,
+        },
+      });
+    } else {
+      await prisma.appSetting.deleteMany({
+        where: { key: STYLE_EXTRACTION_TIMEOUT_MS_KEY },
+      });
+    }
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 });
@@ -215,6 +299,31 @@ test("GET /api/rag/jobs returns progress snapshots", async () => {
     assert.equal(payload.data[0].progress.total, 64);
   } finally {
     ragServices.ragIndexService.listJobSummaries = originalListJobSummaries;
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test("DELETE /api/rag/jobs/finished clears finished job records", async () => {
+  const originalClearFinishedJobs = ragServices.ragJobCleanupService.clearFinishedJobs;
+  ragServices.ragJobCleanupService.clearFinishedJobs = async () => ({
+    deletedCount: 3,
+    activeCount: 1,
+  });
+
+  const app = createApp();
+  const server = http.createServer(app);
+  const port = await listen(server);
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/api/rag/jobs/finished`, {
+      method: "DELETE",
+    });
+    assert.equal(response.status, 200);
+    const payload = await response.json();
+    assert.equal(payload.success, true);
+    assert.equal(payload.data.deletedCount, 3);
+    assert.equal(payload.data.activeCount, 1);
+  } finally {
+    ragServices.ragJobCleanupService.clearFinishedJobs = originalClearFinishedJobs;
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 });
@@ -436,6 +545,114 @@ test("GET /api/settings/api-keys exposes ollama baseURL and optional-key metadat
   }
 });
 
+test("GET /api/settings/api-keys uses lightweight local model metadata", async () => {
+  const originalFindMany = prisma.aPIKey.findMany;
+  const originalFetch = global.fetch;
+  const previousDeepSeekModel = process.env.DEEPSEEK_MODEL;
+  delete process.env.DEEPSEEK_MODEL;
+
+  prisma.aPIKey.findMany = async () => ([
+    {
+      id: "api-key-deepseek",
+      provider: "deepseek",
+      key: "test-deepseek-key",
+      model: null,
+      baseURL: "https://models.example.com/v1",
+      isActive: true,
+      reasoningEnabled: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    },
+  ]);
+  global.fetch = async () => {
+    throw new Error("api-keys summary must not fetch remote model catalogs");
+  };
+
+  const app = createApp();
+  const server = http.createServer(app);
+  const port = await listen(server);
+  try {
+    const response = await originalFetch(`http://127.0.0.1:${port}/api/settings/api-keys`);
+    assert.equal(response.status, 200);
+    const payload = await response.json();
+    assert.equal(payload.success, true);
+    const deepseek = payload.data.find((item) => item.provider === "deepseek");
+    assert.ok(deepseek);
+    assert.equal(deepseek.currentModel, "deepseek-chat");
+    assert.equal(deepseek.isConfigured, true);
+    assert.ok(deepseek.models.includes("deepseek-chat"));
+  } finally {
+    prisma.aPIKey.findMany = originalFindMany;
+    global.fetch = originalFetch;
+    if (previousDeepSeekModel === undefined) {
+      delete process.env.DEEPSEEK_MODEL;
+    } else {
+      process.env.DEEPSEEK_MODEL = previousDeepSeekModel;
+    }
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test("GET and PUT /api/settings/llm-selection persist the top-level model choice", async () => {
+  const originalFindUnique = prisma.appSetting.findUnique;
+  const originalUpsert = prisma.appSetting.upsert;
+  let storedValue = JSON.stringify({
+    provider: "qwen",
+    model: "qwen-plus",
+    temperature: 0.6,
+  });
+
+  prisma.appSetting.findUnique = async () => ({
+    key: "llm.currentSelection",
+    value: storedValue,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  });
+  prisma.appSetting.upsert = async ({ create, update }) => {
+    storedValue = update.value ?? create.value;
+    return {
+      key: "llm.currentSelection",
+      value: storedValue,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+  };
+
+  const app = createApp();
+  const server = http.createServer(app);
+  const port = await listen(server);
+  try {
+    const initialResponse = await fetch(`http://127.0.0.1:${port}/api/settings/llm-selection`);
+    assert.equal(initialResponse.status, 200);
+    const initialPayload = await initialResponse.json();
+    assert.equal(initialPayload.data.provider, "qwen");
+    assert.equal(initialPayload.data.model, "qwen-plus");
+
+    const saveResponse = await fetch(`http://127.0.0.1:${port}/api/settings/llm-selection`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        provider: "minimax",
+        model: "MiniMax-M2.7",
+        temperature: 0.8,
+        maxTokens: 8192,
+      }),
+    });
+    assert.equal(saveResponse.status, 200);
+    const savePayload = await saveResponse.json();
+    assert.equal(savePayload.data.provider, "minimax");
+    assert.equal(savePayload.data.model, "MiniMax-M2.7");
+    assert.equal(savePayload.data.maxTokens, 8192);
+    assert.match(storedValue, /MiniMax-M2\.7/);
+  } finally {
+    prisma.appSetting.findUnique = originalFindUnique;
+    prisma.appSetting.upsert = originalUpsert;
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
 test("GET /api/settings/api-keys exposes custom OpenAI-compatible providers", async () => {
   const originalFindMany = prisma.aPIKey.findMany;
   prisma.aPIKey.findMany = async () => ([
@@ -448,6 +665,8 @@ test("GET /api/settings/api-keys exposes custom OpenAI-compatible providers", as
       baseURL: "https://gateway.example.com/v1",
       isActive: true,
       reasoningEnabled: true,
+      concurrencyLimit: 3,
+      requestIntervalMs: 5000,
       createdAt: new Date(),
       updatedAt: new Date(),
     },
@@ -471,6 +690,8 @@ test("GET /api/settings/api-keys exposes custom OpenAI-compatible providers", as
     assert.equal(custom.requiresApiKey, false);
     assert.equal(custom.isConfigured, true);
     assert.equal(custom.reasoningEnabled, true);
+    assert.equal(custom.concurrencyLimit, 3);
+    assert.equal(custom.requestIntervalMs, 5000);
   } finally {
     prisma.aPIKey.findMany = originalFindMany;
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
@@ -491,6 +712,8 @@ test("PUT /api/settings/api-keys/ollama saves custom baseURL without requiring a
     baseURL: create.baseURL,
     isActive: create.isActive,
     reasoningEnabled: create.reasoningEnabled,
+    concurrencyLimit: create.concurrencyLimit,
+    requestIntervalMs: create.requestIntervalMs,
     createdAt: new Date(),
     updatedAt: new Date(),
   });
@@ -515,6 +738,8 @@ test("PUT /api/settings/api-keys/ollama saves custom baseURL without requiring a
       body: JSON.stringify({
         model: "qwen3:8b",
         baseURL: "http://127.0.0.1:11434/v1",
+        concurrencyLimit: 2,
+        requestIntervalMs: 3000,
       }),
     });
     assert.equal(response.status, 200);
@@ -524,6 +749,8 @@ test("PUT /api/settings/api-keys/ollama saves custom baseURL without requiring a
     assert.equal(payload.data.model, "qwen3:8b");
     assert.equal(payload.data.baseURL, "http://127.0.0.1:11434/v1");
     assert.equal(payload.data.reasoningEnabled, true);
+    assert.equal(payload.data.concurrencyLimit, 2);
+    assert.equal(payload.data.requestIntervalMs, 3000);
     assert.ok(payload.data.models.includes("qwen3:8b"));
   } finally {
     prisma.aPIKey.findUnique = originalFindUnique;
@@ -1147,6 +1374,7 @@ test("creative hub state route exposes latest turn summary metadata", async () =
 });
 
 test("creative hub interrupt route resumes via langgraph and updates thread state", async () => {
+  const originalResolveInterrupt = creativeHubInterruptLangGraph.resolveInterrupt;
   const app = createApp();
   const server = http.createServer(app);
   const port = await listen(server);
@@ -1216,6 +1444,43 @@ test("creative hub interrupt route resumes via langgraph and updates thread stat
         source: "test_seed",
       },
     });
+    creativeHubInterruptLangGraph.resolveInterrupt = async (input) => {
+      const state = await creativeHubService.getThreadState(input.threadId);
+      const messages = [
+        ...state.messages,
+        {
+          id: "ai_test_resume",
+          type: "ai",
+          content: "审批已通过，继续执行测试任务。",
+        },
+      ];
+      const checkpoint = await creativeHubService.saveCheckpoint(input.threadId, {
+        checkpointId: `cp_resumed_${run.id}`,
+        parentCheckpointId: state.currentCheckpointId,
+        runId: run.id,
+        status: "idle",
+        messages,
+        interrupts: [],
+        resourceBindings: state.thread.resourceBindings,
+        metadata: {
+          source: "test_interrupt_mock",
+          interruptId: input.interruptId,
+          action: input.action,
+        },
+      });
+      return {
+        runId: run.id,
+        assistantOutput: "审批已通过，继续执行测试任务。",
+        checkpoint,
+        interrupts: [],
+        status: "idle",
+        latestError: null,
+        messages,
+        resourceBindings: state.thread.resourceBindings,
+        diagnostics: undefined,
+        turnSummary: null,
+      };
+    };
 
     const response = await fetch(`http://127.0.0.1:${port}/api/creative-hub/threads/${thread.id}/interrupts/${approval.id}`, {
       method: "POST",
@@ -1235,6 +1500,7 @@ test("creative hub interrupt route resumes via langgraph and updates thread stat
     assert.ok(Array.isArray(payload.data.messages));
     assert.ok(payload.data.messages.some((item) => item.type === "ai"));
   } finally {
+    creativeHubInterruptLangGraph.resolveInterrupt = originalResolveInterrupt;
     await safeDeleteCreativeHubThread(threadId);
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
@@ -1242,15 +1508,15 @@ test("creative hub interrupt route resumes via langgraph and updates thread stat
 
 test("novel state and planning routes return success payloads", async () => {
   const originalMethods = {
-    getNovelState: NovelService.prototype.getNovelState,
-    getLatestStateSnapshot: NovelService.prototype.getLatestStateSnapshot,
-    getChapterStateSnapshot: NovelService.prototype.getChapterStateSnapshot,
-    rebuildNovelState: NovelService.prototype.rebuildNovelState,
-    generateBookPlan: NovelService.prototype.generateBookPlan,
-    generateArcPlan: NovelService.prototype.generateArcPlan,
-    generateChapterPlan: NovelService.prototype.generateChapterPlan,
-    getChapterPlan: NovelService.prototype.getChapterPlan,
-    replanNovel: NovelService.prototype.replanNovel,
+    getNovelState: DefaultNovelApplicationServices.prototype.getNovelState,
+    getLatestStateSnapshot: DefaultNovelApplicationServices.prototype.getLatestStateSnapshot,
+    getChapterStateSnapshot: DefaultNovelApplicationServices.prototype.getChapterStateSnapshot,
+    rebuildNovelState: DefaultNovelApplicationServices.prototype.rebuildNovelState,
+    generateBookPlan: DefaultNovelApplicationServices.prototype.generateBookPlan,
+    generateArcPlan: DefaultNovelApplicationServices.prototype.generateArcPlan,
+    generateChapterPlan: DefaultNovelApplicationServices.prototype.generateChapterPlan,
+    getChapterPlan: DefaultNovelApplicationServices.prototype.getChapterPlan,
+    replanNovel: DefaultNovelApplicationServices.prototype.replanNovel,
   };
   const novelId = "novel-route-test";
   const chapterId = "chapter-route-test";
@@ -1296,15 +1562,15 @@ test("novel state and planning routes return success payloads", async () => {
       updatedAt: new Date().toISOString(),
     }],
   };
-  NovelService.prototype.getNovelState = async () => ({ latestSnapshot: snapshot, snapshots: [snapshot] });
-  NovelService.prototype.getLatestStateSnapshot = async () => snapshot;
-  NovelService.prototype.getChapterStateSnapshot = async () => snapshot;
-  NovelService.prototype.rebuildNovelState = async () => ({ rebuiltCount: 1, latestSnapshot: snapshot });
-  NovelService.prototype.generateBookPlan = async () => ({ ...plan, chapterId: null, level: "book", scenes: [] });
-  NovelService.prototype.generateArcPlan = async () => ({ ...plan, chapterId: null, level: "arc", externalRef: "arc-1", scenes: [] });
-  NovelService.prototype.generateChapterPlan = async () => plan;
-  NovelService.prototype.getChapterPlan = async () => plan;
-  NovelService.prototype.replanNovel = async () => ({ ...plan, id: "plan-replanned" });
+  DefaultNovelApplicationServices.prototype.getNovelState = async () => ({ latestSnapshot: snapshot, snapshots: [snapshot] });
+  DefaultNovelApplicationServices.prototype.getLatestStateSnapshot = async () => snapshot;
+  DefaultNovelApplicationServices.prototype.getChapterStateSnapshot = async () => snapshot;
+  DefaultNovelApplicationServices.prototype.rebuildNovelState = async () => ({ rebuiltCount: 1, latestSnapshot: snapshot });
+  DefaultNovelApplicationServices.prototype.generateBookPlan = async () => ({ ...plan, chapterId: null, level: "book", scenes: [] });
+  DefaultNovelApplicationServices.prototype.generateArcPlan = async () => ({ ...plan, chapterId: null, level: "arc", externalRef: "arc-1", scenes: [] });
+  DefaultNovelApplicationServices.prototype.generateChapterPlan = async () => plan;
+  DefaultNovelApplicationServices.prototype.getChapterPlan = async () => plan;
+  DefaultNovelApplicationServices.prototype.replanNovel = async () => ({ ...plan, id: "plan-replanned" });
 
   const app = createApp();
   const server = http.createServer(app);
@@ -1379,16 +1645,16 @@ test("novel state and planning routes return success payloads", async () => {
     assert.equal(replanResponse.status, 200);
     assert.equal((await replanResponse.json()).data.id, "plan-replanned");
   } finally {
-    Object.assign(NovelService.prototype, originalMethods);
+    Object.assign(DefaultNovelApplicationServices.prototype, originalMethods);
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 });
 
 test("novel world slice routes return success payloads", async () => {
   const originalMethods = {
-    getWorldSlice: NovelService.prototype.getWorldSlice,
-    refreshWorldSlice: NovelService.prototype.refreshWorldSlice,
-    updateWorldSliceOverrides: NovelService.prototype.updateWorldSliceOverrides,
+    getWorldSlice: DefaultNovelApplicationServices.prototype.getWorldSlice,
+    refreshWorldSlice: DefaultNovelApplicationServices.prototype.refreshWorldSlice,
+    updateWorldSliceOverrides: DefaultNovelApplicationServices.prototype.updateWorldSliceOverrides,
   };
   const novelId = "novel-world-slice-route";
   const worldSliceView = {
@@ -1462,12 +1728,12 @@ test("novel world slice routes return success payloads", async () => {
     isStale: false,
   };
 
-  NovelService.prototype.getWorldSlice = async () => worldSliceView;
-  NovelService.prototype.refreshWorldSlice = async () => ({
+  DefaultNovelApplicationServices.prototype.getWorldSlice = async () => worldSliceView;
+  DefaultNovelApplicationServices.prototype.refreshWorldSlice = async () => ({
     ...worldSliceView,
     isStale: false,
   });
-  NovelService.prototype.updateWorldSliceOverrides = async () => ({
+  DefaultNovelApplicationServices.prototype.updateWorldSliceOverrides = async () => ({
     ...worldSliceView,
     overrides: {
       ...worldSliceView.overrides,
@@ -1511,16 +1777,16 @@ test("novel world slice routes return success payloads", async () => {
     assert.equal(updateResponse.status, 200);
     assert.equal((await updateResponse.json()).data.overrides.scopeNote, "只保留现实压力。");
   } finally {
-    Object.assign(NovelService.prototype, originalMethods);
+    Object.assign(DefaultNovelApplicationServices.prototype, originalMethods);
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 });
 
 test("novel audit routes return success payloads", async () => {
   const originalMethods = {
-    auditChapter: NovelService.prototype.auditChapter,
-    listChapterAuditReports: NovelService.prototype.listChapterAuditReports,
-    resolveAuditIssues: NovelService.prototype.resolveAuditIssues,
+    auditChapter: DefaultNovelApplicationServices.prototype.auditChapter,
+    listChapterAuditReports: DefaultNovelApplicationServices.prototype.listChapterAuditReports,
+    resolveAuditIssues: DefaultNovelApplicationServices.prototype.resolveAuditIssues,
   };
   const novelId = "novel-audit-route-test";
   const chapterId = "chapter-audit-route-test";
@@ -1566,9 +1832,9 @@ test("novel audit routes return success payloads", async () => {
     }],
     auditReports: [report],
   };
-  NovelService.prototype.auditChapter = async () => auditResult;
-  NovelService.prototype.listChapterAuditReports = async () => [report];
-  NovelService.prototype.resolveAuditIssues = async () => [{ ...issue, status: "resolved" }];
+  DefaultNovelApplicationServices.prototype.auditChapter = async () => auditResult;
+  DefaultNovelApplicationServices.prototype.listChapterAuditReports = async () => [report];
+  DefaultNovelApplicationServices.prototype.resolveAuditIssues = async () => [{ ...issue, status: "resolved" }];
 
   const app = createApp();
   const server = http.createServer(app);
@@ -1604,7 +1870,7 @@ test("novel audit routes return success payloads", async () => {
     assert.equal(resolveResponse.status, 200);
     assert.equal((await resolveResponse.json()).data[0].status, "resolved");
   } finally {
-    Object.assign(NovelService.prototype, originalMethods);
+    Object.assign(DefaultNovelApplicationServices.prototype, originalMethods);
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 });

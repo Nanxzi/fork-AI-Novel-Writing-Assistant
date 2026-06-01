@@ -11,7 +11,6 @@ import { prisma } from "../../../db/prisma";
 import { runStructuredPrompt } from "../../../prompting/core/promptRunner";
 import { buildSupplementalCharacterContextBlocks } from "../../../prompting/prompts/novel/characterPreparation.contextBlocks";
 import {
-  supplementalCharacterNormalizePrompt,
   supplementalCharacterPrompt,
 } from "../../../prompting/prompts/novel/characterPreparation.prompts";
 import { NovelContextService } from "../NovelContextService";
@@ -21,6 +20,7 @@ import {
   type SupplementalCharacterGenerationResponseParsed,
 } from "../../../prompting/prompts/novel/characterPreparation.promptSchemas";
 import { buildStoryModePromptBlock, normalizeStoryModeOutput } from "../../storyMode/storyModeProfile";
+import { parseCharacterProhibitionsJson } from "../characters/characterHardFacts";
 
 type CharacterRowForOutput = Awaited<ReturnType<typeof prisma.character.create>>;
 
@@ -69,6 +69,15 @@ function serializeCharacter(row: CharacterRowForOutput): Character {
     personality: row.personality,
     background: row.background,
     development: row.development,
+    identityLabel: row.identityLabel,
+    factionLabel: row.factionLabel,
+    stanceLabel: row.stanceLabel,
+    powerLevel: row.powerLevel,
+    realm: row.realm,
+    currentLocation: row.currentLocation,
+    availability: row.availability,
+    prohibitions: parseCharacterProhibitionsJson(row.prohibitionsJson),
+    prohibitionsJson: row.prohibitionsJson,
     outerGoal: row.outerGoal,
     innerNeed: row.innerNeed,
     fear: row.fear,
@@ -91,75 +100,9 @@ function serializeCharacter(row: CharacterRowForOutput): Character {
   };
 }
 
-function hasTooMuchLatinText(value: string | null | undefined): boolean {
-  const text = value?.trim() ?? "";
-  if (!text) {
-    return false;
-  }
-  const latinCount = (text.match(/[A-Za-z]/g) ?? []).length;
-  const chineseCount = (text.match(/[\u4e00-\u9fff]/g) ?? []).length;
-  return latinCount >= 8 && latinCount > chineseCount * 2;
-}
-
 function toPromptFallback(value: string | null | undefined, fallback: string): string {
   const normalized = value?.trim();
   return normalized && normalized.length > 0 ? normalized : fallback;
-}
-
-function shouldNormalizeSupplementalLanguage(parsed: SupplementalCharacterGenerationResponseParsed): boolean {
-  if (hasTooMuchLatinText(parsed.planningSummary)) {
-    return true;
-  }
-
-  return parsed.candidates.some((candidate) => {
-    const candidateTexts = [
-      candidate.role,
-      candidate.summary,
-      candidate.storyFunction,
-      candidate.relationToProtagonist,
-      candidate.personality,
-      candidate.background,
-      candidate.development,
-      candidate.outerGoal,
-      candidate.innerNeed,
-      candidate.fear,
-      candidate.wound,
-      candidate.misbelief,
-      candidate.secret,
-      candidate.moralLine,
-      candidate.firstImpression,
-      candidate.currentState,
-      candidate.currentGoal,
-      candidate.whyNow,
-      ...candidate.relations.flatMap((relation) => [
-        relation.surfaceRelation,
-        relation.hiddenTension,
-        relation.conflictSource,
-        relation.dynamicLabel,
-        relation.nextTurnPoint,
-      ]),
-    ];
-    return candidateTexts.some((text) => hasTooMuchLatinText(text));
-  });
-}
-
-async function normalizeSupplementalLanguage(
-  novelId: string,
-  options: SupplementalCharacterGenerateInput,
-  parsed: SupplementalCharacterGenerationResponseParsed,
-): Promise<SupplementalCharacterGenerationResponseParsed> {
-  const result = await runStructuredPrompt({
-    asset: supplementalCharacterNormalizePrompt,
-    promptInput: {
-      payloadJson: JSON.stringify(parsed, null, 2),
-    },
-    options: {
-      provider: options.provider,
-      model: options.model,
-      temperature: 0.2,
-    },
-  });
-  return result.output;
 }
 
 export class CharacterPreparationSupplementalService {
@@ -238,6 +181,14 @@ export class CharacterPreparationSupplementalService {
             personality: true,
             background: true,
             development: true,
+            identityLabel: true,
+            factionLabel: true,
+            stanceLabel: true,
+            powerLevel: true,
+            realm: true,
+            currentLocation: true,
+            availability: true,
+            prohibitionsJson: true,
             outerGoal: true,
             currentState: true,
             currentGoal: true,
@@ -305,6 +256,17 @@ export class CharacterPreparationSupplementalService {
             character.castRole ? `阵容位=${getCastRolePromptLabel(character.castRole)} (${character.castRole})` : "",
             character.storyFunction ? `故事作用=${character.storyFunction}` : "",
             character.relationToProtagonist ? `与主角关系=${character.relationToProtagonist}` : "",
+            character.personality ? `性格=${character.personality}` : "",
+            character.background ? `背景=${character.background}` : "",
+            character.development ? `成长=${character.development}` : "",
+            character.identityLabel ? `身份=${character.identityLabel}` : "",
+            character.factionLabel ? `阵营=${character.factionLabel}` : "",
+            character.stanceLabel ? `立场=${character.stanceLabel}` : "",
+            character.powerLevel ? `境界=${character.powerLevel}` : "",
+            character.realm ? `境界层=${character.realm}` : "",
+            character.currentLocation ? `地点=${character.currentLocation}` : "",
+            character.availability ? `可出场=${character.availability}` : "",
+            character.prohibitionsJson ? `禁止=${parseCharacterProhibitionsJson(character.prohibitionsJson).join(" / ")}` : "",
             character.outerGoal ? `外在目标=${character.outerGoal}` : "",
             character.currentState ? `当前状态=${character.currentState}` : "",
             character.currentGoal ? `当前目标=${character.currentGoal}` : "",
@@ -317,6 +279,9 @@ export class CharacterPreparationSupplementalService {
             `${character.name} (${character.role})`,
             character.storyFunction ? `故事作用=${character.storyFunction}` : "",
             character.relationToProtagonist ? `与主角关系=${character.relationToProtagonist}` : "",
+            character.identityLabel ? `身份=${character.identityLabel}` : "",
+            character.factionLabel ? `阵营=${character.factionLabel}` : "",
+            character.powerLevel ? `境界=${character.powerLevel}` : "",
             character.currentState ? `当前状态=${character.currentState}` : "",
             character.currentGoal ? `当前目标=${character.currentGoal}` : "",
           ].filter(Boolean).join(" | "))
@@ -348,22 +313,16 @@ export class CharacterPreparationSupplementalService {
       },
     });
     const parsed = result.output;
-    const normalizedParsed = shouldNormalizeSupplementalLanguage(parsed)
-      ? await normalizeSupplementalLanguage(novelId, options, parsed).catch(() => parsed)
-      : parsed;
-    if (shouldNormalizeSupplementalLanguage(normalizedParsed)) {
-      throw new Error("补充角色生成结果仍含大段英文描述，请重试一次或切换模型后再生成。");
-    }
 
     const requestedCount = typeof options.count === "number" ? options.count : null;
-    const normalizedCandidates = (requestedCount ? normalizedParsed.candidates.slice(0, requestedCount) : normalizedParsed.candidates)
+    const normalizedCandidates = (requestedCount ? parsed.candidates.slice(0, requestedCount) : parsed.candidates)
       .map((candidate) => supplementalCharacterCandidateSchema.parse(candidate))
       .slice(0, 3);
 
     return {
-      mode: normalizedParsed.mode,
-      recommendedCount: requestedCount ?? Math.min(Math.max(normalizedParsed.recommendedCount, 1), normalizedCandidates.length || 1),
-      planningSummary: toOptionalText(normalizedParsed.planningSummary),
+      mode: parsed.mode,
+      recommendedCount: requestedCount ?? Math.min(Math.max(parsed.recommendedCount, 1), normalizedCandidates.length || 1),
+      planningSummary: toOptionalText(parsed.planningSummary),
       candidates: normalizedCandidates.map((candidate) => ({
         name: candidate.name,
         role: candidate.role,
@@ -375,6 +334,14 @@ export class CharacterPreparationSupplementalService {
         personality: toOptionalText(candidate.personality),
         background: toOptionalText(candidate.background),
         development: toOptionalText(candidate.development),
+        identityLabel: toOptionalText(candidate.identityLabel),
+        factionLabel: toOptionalText(candidate.factionLabel),
+        stanceLabel: toOptionalText(candidate.stanceLabel),
+        powerLevel: toOptionalText(candidate.powerLevel),
+        realm: toOptionalText(candidate.realm),
+        currentLocation: toOptionalText(candidate.currentLocation),
+        availability: toOptionalText(candidate.availability),
+        prohibitions: candidate.prohibitions,
         outerGoal: toOptionalText(candidate.outerGoal),
         innerNeed: toOptionalText(candidate.innerNeed),
         fear: toOptionalText(candidate.fear),
@@ -424,6 +391,14 @@ export class CharacterPreparationSupplementalService {
       personality: toOptionalText(parsedCandidate.personality) ?? undefined,
       background: toOptionalText(parsedCandidate.background) ?? undefined,
       development: toOptionalText(parsedCandidate.development) ?? undefined,
+      identityLabel: toOptionalText(parsedCandidate.identityLabel) ?? undefined,
+      factionLabel: toOptionalText(parsedCandidate.factionLabel) ?? undefined,
+      stanceLabel: toOptionalText(parsedCandidate.stanceLabel) ?? undefined,
+      powerLevel: toOptionalText(parsedCandidate.powerLevel) ?? undefined,
+      realm: toOptionalText(parsedCandidate.realm) ?? undefined,
+      currentLocation: toOptionalText(parsedCandidate.currentLocation) ?? undefined,
+      availability: toOptionalText(parsedCandidate.availability) ?? undefined,
+      prohibitions: parsedCandidate.prohibitions,
       outerGoal: toOptionalText(parsedCandidate.outerGoal) ?? undefined,
       innerNeed: toOptionalText(parsedCandidate.innerNeed) ?? undefined,
       fear: toOptionalText(parsedCandidate.fear) ?? undefined,

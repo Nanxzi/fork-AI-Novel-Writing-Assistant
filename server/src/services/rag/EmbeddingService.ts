@@ -1,20 +1,26 @@
-import type { LLMProvider } from "@ai-novel/shared/types/llm";
 import { prisma } from "../../db/prisma";
 import { ragConfig } from "../../config/rag";
-import { PROVIDERS } from "../../llm/providers";
+import type { LLMProvider } from "@ai-novel/shared/types/llm";
+import {
+  getProviderEnvApiKey,
+  isBuiltInProvider,
+  providerRequiresApiKey,
+  PROVIDERS,
+  resolveProviderBaseUrl,
+} from "../../llm/providers";
 import { normalizeRagText } from "./utils";
 import { getRagEmbeddingSettings } from "../settings/RagSettingsService";
 
 interface EmbeddingResult {
   vectors: number[][];
   model: string;
-  provider: "openai" | "siliconflow";
+  provider: LLMProvider;
 }
 
 interface EmbeddingRuntimeTarget {
-  provider: "openai" | "siliconflow";
+  provider: LLMProvider;
   model: string;
-  apiKey: string;
+  apiKey?: string;
   baseUrl: string;
 }
 
@@ -26,39 +32,6 @@ class EmbeddingRequestError extends Error {
   ) {
     super(message);
     this.name = "EmbeddingRequestError";
-  }
-}
-
-function getProviderEnvBaseUrl(provider: LLMProvider): string | undefined {
-  switch (provider) {
-    case "openai":
-      return process.env.OPENAI_BASE_URL;
-    case "siliconflow":
-      return process.env.SILICONFLOW_BASE_URL;
-    default:
-      return undefined;
-  }
-}
-
-function getProviderEnvModel(provider: LLMProvider): string | undefined {
-  switch (provider) {
-    case "openai":
-      return process.env.EMBEDDING_MODEL ?? process.env.OPENAI_EMBEDDING_MODEL ?? process.env.OPENAI_MODEL;
-    case "siliconflow":
-      return process.env.EMBEDDING_MODEL ?? process.env.SILICONFLOW_EMBEDDING_MODEL ?? process.env.SILICONFLOW_MODEL;
-    default:
-      return undefined;
-  }
-}
-
-function getProviderEnvApiKey(provider: LLMProvider): string | undefined {
-  switch (provider) {
-    case "openai":
-      return process.env.OPENAI_API_KEY;
-    case "siliconflow":
-      return process.env.SILICONFLOW_API_KEY;
-    default:
-      return undefined;
   }
 }
 
@@ -103,9 +76,9 @@ export class EmbeddingService {
       });
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
-        throw new EmbeddingRequestError(`Embedding 请求超时（>${ragConfig.embeddingTimeoutMs}ms）。`, true, true);
+        throw new EmbeddingRequestError(`Embedding request timed out (>${ragConfig.embeddingTimeoutMs}ms).`, true, true);
       }
-      throw new EmbeddingRequestError(`Embedding 网络请求失败：${toErrorMessage(error)}。`, true, true);
+      throw new EmbeddingRequestError(`Embedding network request failed: ${toErrorMessage(error)}.`, true, true);
     } finally {
       clearTimeout(timer);
     }
@@ -126,15 +99,15 @@ export class EmbeddingService {
       const isNetworkLike = /timeout|timed out|fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up/i
         .test(message);
       return new EmbeddingRequestError(
-        isNetworkLike ? `Embedding 网络请求失败：${message}。` : message,
+        isNetworkLike ? `Embedding network request failed: ${message}.` : message,
         isNetworkLike,
         isNetworkLike,
       );
     }
-    return new EmbeddingRequestError("Embedding 请求失败。", false, false);
+    return new EmbeddingRequestError("Embedding request failed.", false, false);
   }
 
-  private async resolveRuntimeSettings(): Promise<{ provider: "openai" | "siliconflow"; model: string }> {
+  private async resolveRuntimeSettings(): Promise<{ provider: LLMProvider; model: string }> {
     const settings = await getRagEmbeddingSettings();
     return {
       provider: settings.embeddingProvider,
@@ -142,33 +115,59 @@ export class EmbeddingService {
     };
   }
 
-  private async resolveApiKey(provider: "openai" | "siliconflow"): Promise<string> {
-    const envApiKey = getProviderEnvApiKey(provider);
-    if (envApiKey) {
-      return envApiKey;
-    }
+  private async resolveApiKey(provider: LLMProvider): Promise<string | undefined> {
     try {
       const dbSecret = await prisma.aPIKey.findUnique({ where: { provider } });
-      if (dbSecret?.isActive && dbSecret.key) {
-        return dbSecret.key;
+      if (dbSecret?.isActive && dbSecret.key?.trim()) {
+        return dbSecret.key.trim();
       }
     } catch (error) {
       if (!isMissingTableError(error)) {
         throw error;
       }
     }
-    throw new Error(`未配置 ${provider} 的 Embedding API Key。`);
+
+    const envApiKey = getProviderEnvApiKey(provider);
+    if (envApiKey) {
+      return envApiKey;
+    }
+
+    if (!providerRequiresApiKey(provider)) {
+      return undefined;
+    }
+
+    throw new Error(`Embedding API key is not configured for provider=${provider}.`);
   }
 
-  private resolveBaseUrl(provider: "openai" | "siliconflow"): string {
-    return (
-      getProviderEnvBaseUrl(provider)
-      ?? PROVIDERS[provider].baseURL
-    ).replace(/\/+$/, "");
+  private async resolveBaseUrl(provider: LLMProvider): Promise<string> {
+    let dbBaseURL: string | undefined;
+    try {
+      const record = await prisma.aPIKey.findUnique({ where: { provider } });
+      if (record?.isActive && record.baseURL?.trim()) {
+        dbBaseURL = record.baseURL.trim();
+      }
+    } catch (error) {
+      if (!isMissingTableError(error)) {
+        throw error;
+      }
+    }
+
+    const resolved = resolveProviderBaseUrl(provider, dbBaseURL, dbBaseURL);
+    if (resolved) {
+      return resolved.replace(/\/+$/, "");
+    }
+
+    throw new Error(`Embedding API URL is not configured for provider=${provider}.`);
   }
 
-  private resolveModel(provider: "openai" | "siliconflow"): string {
-    return getProviderEnvModel(provider) ?? ragConfig.embeddingModel;
+  private resolveModel(provider: LLMProvider, model?: string): string {
+    const resolved = model?.trim()
+      || ragConfig.embeddingModel
+      || (isBuiltInProvider(provider) ? PROVIDERS[provider].defaultModel : "");
+    if (!resolved) {
+      throw new Error(`Embedding model is not configured for provider=${provider}.`);
+    }
+    return resolved;
   }
 
   private async requestEmbeddingBatch(texts: string[], target: EmbeddingRuntimeTarget): Promise<number[][]> {
@@ -178,7 +177,7 @@ export class EmbeddingService {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            Authorization: `Bearer ${target.apiKey}`,
+            ...(target.apiKey ? { Authorization: `Bearer ${target.apiKey}` } : {}),
           },
           body: JSON.stringify({
             model: target.model,
@@ -192,7 +191,7 @@ export class EmbeddingService {
           const retryable = status === 408 || status === 409 || status === 429 || status >= 500;
           const shouldSplitBatch = status === 413 || status === 414 || status === 429 || status >= 500;
           throw new EmbeddingRequestError(
-            `Embedding 请求失败(${status})：${errorText || "无详细错误"}。`,
+            `Embedding request failed (${status}): ${errorText || "unknown error"}.`,
             retryable,
             shouldSplitBatch,
           );
@@ -208,7 +207,7 @@ export class EmbeddingService {
           .filter((item): item is number[] => Array.isArray(item) && item.length > 0);
 
         if (vectors.length !== texts.length) {
-          throw new EmbeddingRequestError("Embedding 返回向量数量与输入不一致。", false, false);
+          throw new EmbeddingRequestError("Embedding response vector count did not match the input count.", false, false);
         }
 
         return vectors;
@@ -222,7 +221,7 @@ export class EmbeddingService {
       }
     }
 
-    throw new EmbeddingRequestError("Embedding 请求失败：达到最大重试次数。", true, true);
+    throw new EmbeddingRequestError("Embedding request failed after exhausting retries.", true, true);
   }
 
   private async embedWithAdaptiveSplit(texts: string[], target: EmbeddingRuntimeTarget): Promise<number[][]> {
@@ -260,8 +259,8 @@ export class EmbeddingService {
     const target: EmbeddingRuntimeTarget = {
       provider,
       apiKey,
-      baseUrl: this.resolveBaseUrl(provider),
-      model: settings.model || this.resolveModel(provider),
+      baseUrl: await this.resolveBaseUrl(provider),
+      model: this.resolveModel(provider, settings.model),
     };
 
     const vectors = await this.embedWithAdaptiveSplit(texts, target);

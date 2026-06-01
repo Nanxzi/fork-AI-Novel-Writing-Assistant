@@ -59,6 +59,7 @@ const EMPTY_STATE: StoryMacroState = {
 
 interface UseNovelStoryMacroInput {
   novelId: string;
+  enabled?: boolean;
   llm: {
     provider: LLMProvider;
     model: string;
@@ -85,7 +86,7 @@ export function useNovelStoryMacro(input: UseNovelStoryMacroInput): {
   tab: StoryMacroTabProps;
   ready: boolean;
 } {
-  const { novelId, llm } = input;
+  const { novelId, llm, enabled = true } = input;
   const queryClient = useQueryClient();
   const [storyInput, setStoryInput] = useState("");
   const [expansion, setExpansion] = useState<StoryExpansion | null>(EMPTY_EXPANSION);
@@ -99,7 +100,7 @@ export function useNovelStoryMacro(input: UseNovelStoryMacroInput): {
   const planQuery = useQuery({
     queryKey: queryKeys.novels.storyMacro(novelId),
     queryFn: () => getNovelStoryMacroPlan(novelId),
-    enabled: Boolean(novelId),
+    enabled: Boolean(novelId && enabled),
   });
 
   const invalidatePlan = async () => {

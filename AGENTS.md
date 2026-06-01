@@ -32,35 +32,188 @@
 - Do not assume the primary user can manually repair structure, pacing, character arcs, or chapter planning without substantial AI support.
 - If there is a tradeoff between expert-oriented flexibility and beginner completion rate, prefer the path that better helps a novice user successfully produce a complete novel.
 
+## UI Copy Rules
+
+- All user-facing UI copy must explain the function from the user's perspective: what the user can do, what the system is helping with, or what the next step is.
+- Do not write UI copy as implementation commentary, migration commentary, refactor commentary, or change-history commentary.
+- Avoid product-facing copy that uses process/meta wording such as `现在`, `不再`, `已经`, `之前`, `原本`, `迁回`, `升级为`, or similar "we changed this" narration when the text is visible to end users.
+- Prefer direct task wording such as:
+  - entry point guidance;
+  - action guidance;
+  - expected effect;
+  - current selection or current result.
+- If a workflow belongs in another module, explain the correct user entry point directly, for example "从小说基础信息设置书级默认写法", rather than "书级默认写法已经迁回小说页".
+- Before finishing UI work, review newly added copy and rewrite any sentence that sounds like it is talking to the developer or describing the modification process.
+
 ## Architecture Rules
 
 - If a single source file becomes too long, it must be split into functional modules.
 - Preferred threshold: keep a single source file around 600 lines.
 - Floating range: 500-700 lines is acceptable when module cohesion is still clear and the file is not becoming hard to maintain.
 - Hard threshold: when a source file exceeds 700 lines, refactoring and modularization are mandatory before continuing feature expansion.
+- Long-file splitting must improve module boundaries, not merely reduce line count.
+- Before splitting a long file, list its responsibilities and separate business rules, application orchestration, persistence/external adapters, and HTTP/API mapping.
+- Do not split an oversized file by adding loose same-level files such as generic `helper`, `utils`, `shared`, or `runtime` files without clear module ownership.
+- Extracted files must move into an explicit responsibility folder such as `domain/`, `application/`, `infrastructure/`, or `http/`, or into an existing business-stage folder with the same clarity of ownership.
+- If a directory contains more than 12 `.ts` files, create or use a lower-level module directory before adding more peer files.
+- If more than 4 files share the same feature prefix, for example `novelDirector*`, converge them into a dedicated feature directory instead of continuing the prefix-based flat layout.
+- A `utils`, `helpers`, or `shared` file that grows beyond 300 lines or is depended on by more than 3 modules must be promoted into an owned service, policy, adapter, or domain module.
+- After a split, outside modules should consume the capability through the module facade or `index.ts`; avoid deep imports into another module's internal files.
+- If a split affects workflows, prompt/runtime contracts, automatic director chains, chapter execution chains, or other major novel-production links, add or update the module README or boundary notes before continuing feature expansion.
+- For server-side architecture convergence, keep the current `server/src` structure runnable while gradually moving toward clear top-level ownership: `app/` for startup and route mounting, `platform/` for db/llm/events/runtime/config infrastructure, and `modules/` for product capabilities.
+- Server business modules should be organized around the novel completion workflow when applicable: `setup`, `planning`, `production`, `director`, `characters`, `state`, and `export`.
+- High-density server directories should be reduced incrementally. `routes` should converge into module-owned `http/` entrypoints, `services/novel` should keep only facades and stable shared entrypoints at its root, and `services/novel/director` should converge into owned submodules such as `commands`, `runtime`, `state`, `automation`, `projections`, `recovery`, and `phases`.
+- Each architecture cleanup phase should move only one coherent subsystem, preserve compatibility exports where needed, check dependency direction, and run targeted TypeScript or service-level verification before the phase is considered complete.
+
+## Project Development Wiki Rules
+
+This project must continuously maintain a development wiki for architecture decisions, workflow rules, module boundaries, runtime contracts, debugging lessons, and product design rationale.
+
+The wiki is not a record of "what changed". It should help future developers and AI agents understand why the system is designed this way and how it should be maintained.
+
+### What Should Be Documented
+
+Document stable knowledge such as:
+
+- Design boundaries for core modules such as auto-director, chapter production, Creative Hub, task center, RAG, and Prompt Registry.
+- Important architecture decisions and their reasons.
+- Runtime state contracts, stage transition rules, recovery rules, retry rules, and failure-handling rules.
+- AI invocation conventions such as Prompt Schema, structured output, JSON repair, and context assembly.
+- Module ownership, dependency direction, and boundaries that forbid cross-layer calls.
+- Repeated failure modes, debugging conclusions, and recommended diagnosis paths.
+- Product principles and UX decisions that help beginners complete a full novel.
+
+### What Should Not Be Documented
+
+Do not add wiki entries for:
+
+- Tiny changes with no long-term value.
+- Per-commit file modification lists.
+- Temporary TODOs.
+- Pure release-note content.
+- Implementation details that are likely to be discarded soon.
+- Narration that only says what changed in the current task.
+
+### Wiki Writing Rules
+
+- Use Chinese by default unless the surrounding document is clearly English-only.
+- Write for future developers and future AI agents.
+- Explain the reason behind a decision, not just the decision itself.
+- Prefer sections such as `Background / Decision / Current Rule / Examples / Failure Modes / Related Modules / Source Documents`.
+- Keep entries stable, clear, and actionable.
+- Avoid vague wording such as "optimize later", "handle properly", or "improve this".
+- If a rule affects auto-director, chapter production, Prompt, RAG, task state, or frontend projection, state the affected scope explicitly.
+
+### Recommended Locations
+
+- `docs/wiki/architecture/`: architecture design, module boundaries, dependency direction.
+- `docs/wiki/workflows/`: auto-director, chapter production, recovery chain, task center, and other workflows.
+- `docs/wiki/prompts/`: Prompt Registry, structured output, JSON repair, schema conventions.
+- `docs/wiki/rag/`: embedding, vector retrieval, context assembly, knowledge-base rules.
+- `docs/wiki/debugging/`: recurring failures, diagnosis paths, recovery methods.
+- `docs/wiki/product/`: beginner-first decisions, full-novel completion, UX rationale.
+
+### When To Update The Wiki
+
+Before completing any of the following, check whether the work produced stable wiki-worthy knowledge:
+
+- A development phase.
+- A significant bug fix.
+- An architecture adjustment.
+- A core workflow change.
+- A change to Prompt Schema, runtime state, task recovery, or the chapter production chain.
+- A commit, push, or PR.
+
+If stable knowledge was introduced or clarified, update the relevant wiki page before the phase is considered complete.
+
+If no wiki update is needed, explicitly state that the change has no long-term wiki value and should remain only in code or release notes.
+
+### Wiki And Release Notes Boundary
+
+- Wiki records durable project knowledge.
+- Release Notes record user-visible product changes.
+- README latest update only shows the latest public-facing summary.
+- Do not write the wiki as a changelog.
+- Do not copy release notes into the wiki.
+- If a change affects both user behavior and long-term architecture, update both release notes and the relevant wiki page.
+
+### Novel Production Wiki Priority
+
+These areas have the highest priority for wiki accumulation:
+
+1. Auto-director runtime, recovery, checkpoints, and resume behavior.
+2. Chapter production chain, including draft generation, review, repair, save, and retry rules.
+3. Runtime state contracts between backend, task center, and frontend projections.
+4. Prompt Registry rules, structured output schemas, and JSON repair boundaries.
+5. Creative Hub boundaries: what it can create, when it should hand off to auto-director, and when it should avoid becoming general chat.
+6. RAG and context assembly rules for worldbuilding, characters, chapters, style, and continuity.
+7. Beginner-first product decisions that reduce cognitive load and help users complete a full novel.
+
+## Agent Collaboration Rules
+
+- The project allows subagents to assist with development, investigation, verification, and documentation work when the active tool environment and higher-priority instructions permit it.
+- Use subagents for well-scoped parallel work such as independent codebase exploration, focused implementation slices, documentation audits, or non-blocking verification.
+- When delegating implementation, assign clear ownership of files or modules. Subagents must not revert or overwrite changes made by others.
+- Do not use subagents to bypass project safety rules, data protection rules, branch workflow, prompt governance, or release-note / wiki requirements.
+- Do not delegate destructive operations, database resets, migrations with data-loss risk, public release uploads, or branch promotion decisions.
+- Integrate subagent output through normal review: inspect the diff, confirm it matches the current product and architecture rules, run or reuse appropriate verification, and document residual risk.
+
+## Verification Reuse Rules
+
+- Prefer targeted verification that matches the actual change scope.
+- If a recent build, typecheck, packaging check, or test run already covers the same code paths after the relevant files last changed, do not repeat the same expensive verification by default.
+- Before reusing recent verification, confirm the evidence is recent, tied to the same branch or commit range, and not invalidated by subsequent changes.
+- Build commands can take significant time. Avoid repeated `pnpm build`, `pnpm typecheck`, desktop packaging, or full test-suite runs when the current diff is documentation-only or already covered by a recent successful run.
+- If verification is reused instead of rerun, state exactly what prior check is being trusted and why it still applies.
+- If no suitable recent verification exists, or the change touches runtime contracts, prompt schemas, task recovery, database behavior, packaging, or cross-module product flow, run the narrowest sufficient check and document any skipped broader checks.
 
 ## Development Branch Workflow
 
 - When developing a new feature that may affect the end-to-end product flow, default workflow, shared contracts, or other major system links, do not develop directly on `main`.
-- In these cases, first create or switch to a dedicated `dev` branch for that feature, complete implementation and functional verification there, and merge back to `main` only after the feature is tested and stable enough.
-- After the feature branch has been successfully merged back into `main`, clean up that development branch so old feature branches do not accumulate indefinitely.
+- In these cases, first create or switch to a dedicated feature development branch, complete implementation and functional verification there, then merge into the pre-release `beta` branch for integration verification. Merge back to `main` only after `beta` has been tested and stable enough for release.
+- For phased development, making an intentional commit after each completed development phase is mandatory. A phase is complete when its scope is coherent, the relevant verification has passed or the remaining verification gap is explicitly documented, and the working tree contains only that phase's intended changes.
+- This phase-completion commit rule also applies to small isolated fixes, documentation-only updates, workflow-rule updates, and low-risk UI polish unless the user explicitly says not to commit yet.
+- Before each phase commit, inspect the Git scope and follow the README Release Notes Workflow when the phase has user-facing impact. If the diff is purely internal, document that release notes were intentionally skipped.
+- After the feature branch has been successfully merged into `beta` and no longer needs follow-up work, clean up that development branch so old feature branches do not accumulate indefinitely.
 - This rule applies in particular to changes that touch cross-stage workflows, shared runtime/prompting/context contracts, automatic director chains, chapter execution chains, data migration behavior, or other changes that can impact the overall chain.
-- Small isolated fixes, copy changes, low-risk UI polish, or documentation-only updates can still be handled without requiring a separate feature `dev` branch unless the user explicitly asks otherwise.
+- Small isolated fixes, copy changes, low-risk UI polish, or documentation-only updates can still be handled without requiring a separate feature development branch unless the user explicitly asks otherwise. If the change is release-facing, still prefer passing through `beta` before `main`.
 
-### Temporary Desktop Branch Policy
+### Pre-release Beta Branch Workflow
 
-- Until desktopization work is completed and `desktop-dev` has been merged back into `main`, treat `desktop-dev` as the long-lived integration branch for desktop-related development.
-- During this temporary phase, `main` remains the stable branch for already verified work, small isolated fixes, documentation changes, and low-risk updates that do not need to wait for desktopization to finish.
-- Do not merge every new `main` commit into `desktop-dev` immediately by default. Sync in batches when it is actually useful, instead of creating unnecessary merge noise.
-- You must sync `main` into `desktop-dev` when any of the following is true:
-  - `main` changed shared contracts, shared runtime/state logic, build/dependency setup, or any other code that `desktop-dev` also depends on;
-  - a new `desktop-dev` work slice is about to start and it should build on the latest stable base;
-  - `desktop-dev` is about to enter integration testing, release verification, or merge-back into `main`;
-  - `desktop-dev` has drifted far enough from `main` that conflict risk is starting to rise.
-- If `main` only contains clearly unrelated small fixes, copy edits, or other low-risk changes that do not affect desktopization, it is acceptable to delay the sync and merge them into `desktop-dev` later as a batch.
-- If a new change is expected to affect both the normal web flow and the ongoing desktopization work, prefer implementing it on a dedicated short-lived feature branch or directly on `desktop-dev`, instead of landing it on `main` first and forcing immediate back-merges.
-- When syncing `main` into `desktop-dev`, prefer `merge` if the branch is shared by multiple collaborators. Only use `rebase` when the branch is effectively single-owner and history rewriting will not disrupt anyone else.
-- Once desktopization has been completed, merged into `main`, and the `desktop-dev` branch has been retired, this temporary policy should be considered expired and the repository should fall back to the normal feature-branch workflow above.
+- Use `beta` as the stable pre-release integration branch between feature development branches and `main`.
+- The normal release path is: feature branch -> self-test / targeted verification -> merge into `beta` -> integration testing / regression checks / packaging verification -> merge into `main` -> public release or packaging upload.
+- `main` is the stable release branch. Do not merge a feature branch directly into `main` when the change affects product flow, shared contracts, runtime behavior, data migration, desktop packaging, or other end-to-end links.
+- `beta` should represent the next candidate release. Keep it buildable, runnable, and suitable for acceptance testing; do not use it as a dumping ground for unfinished experiments.
+- If multiple feature branches are merged into `beta`, test the combined behavior on `beta` before promoting the batch to `main`, especially around automatic director flow, chapter execution, prompt/runtime contracts, migrations, and desktop startup or packaging.
+- If `beta` validation fails, fix the issue on the original feature branch when the fault is isolated, or on a short-lived `beta-fix` branch when the failure is caused by integration between multiple features. Merge the fix back into `beta` and rerun the failed checks before promoting.
+- Only promote `beta` to `main` when the release candidate has passed the required functional checks, build checks, and any packaging verification relevant to the release. After promotion, keep `beta` aligned with `main` so the next pre-release cycle starts from the released state.
+- For urgent production hotfixes, it is acceptable to branch from `main`, verify narrowly, merge back to `main`, and then immediately merge or cherry-pick the hotfix into `beta` so the pre-release branch does not lose the production fix.
+- Public desktop packaging and release upload should be performed from `main` or from a release tag created after `beta` has been promoted to `main`, not directly from a feature branch or an unverified `beta` state.
+- The branch name is `beta`. Do not create a separate `bate` branch; if such a typo branch appears, migrate any useful work to `beta` and remove the typo branch after confirming nothing is lost.
+
+### Desktop Branch Completion Workflow
+
+- Desktop feature development on `desktop-dev` is considered complete. Do not start new desktop feature work directly on `desktop-dev` unless the user explicitly reopens desktopization as an active development phase.
+- Treat `desktop-dev` as a completion candidate that must move through stabilization, pre-release verification, and branch retirement.
+- Before promoting desktop work, sync any required stable changes from `main` into `desktop-dev` when they affect shared contracts, runtime/state logic, build/dependency setup, desktop startup, packaging, or release verification.
+- Run desktop-focused verification on `desktop-dev` first, including development startup, first-run configuration, core web flow compatibility, build checks, and packaging checks relevant to the target release.
+- After `desktop-dev` passes its focused verification, merge it into `beta` for combined pre-release testing with the rest of the next release candidate.
+- Do not promote desktop work from `desktop-dev` directly to `main`. `beta` must pass integration testing and release packaging verification before the desktop work reaches `main`.
+- If `beta` exposes desktop integration failures, fix them on a short-lived desktop stabilization branch or directly on `desktop-dev` if the desktop branch has not yet been retired, then merge the fix back into `beta` and rerun the failed checks.
+- Once `beta` has been promoted to `main` and the released `main` contains the completed desktop work, retire `desktop-dev` so future desktop changes follow the normal feature branch -> `beta` -> `main` workflow.
+- After retirement, `desktop-dev` should not be reused as a long-lived integration branch. Create short-lived feature branches for future desktop fixes or improvements, and promote them through `beta`.
+
+## Desktop Packaging Upload Rules
+
+- Public desktop package upload to GitHub Releases is allowed only when the release version is driven by `desktop/package.json` and the Git tag is exactly `vX.Y.Z`.
+- Before any public desktop upload, verify that `desktop/package.json` `version` is a stable semver like `0.2.3`, with no `desktop-` prefix, no `-r1` style suffix, and no branch-only naming mixed into the version field.
+- The pushed release tag must match `desktop/package.json` exactly after adding the `v` prefix. Example: `desktop/package.json` is `0.2.3`, then the only allowed public release tag is `v0.2.3`.
+- Do not use `desktop-vX.Y.Z-rN`, `desktop-v*`, branch names, workflow dispatch on `main`, or any other non-matching ref as the identifier for a public desktop GitHub Release upload.
+- If a build is triggered manually or from a non-matching tag, treat it as verification or packaging only. It must not be treated as a valid public release upload.
+- If the required `vX.Y.Z` tag and `desktop/package.json` version are not aligned, stop before upload, fix the version/tag pair first, and then rerun the release flow.
+- When packaging is requested and there is no explicit, current, repo-specific knowledge that local packaging is required, prefer triggering the GitHub-side packaging workflow rather than inventing local packaging steps.
+- Do not run local desktop packaging just to guess the release process. Local packaging is appropriate only when the user explicitly asks for local artifacts, the task is packaging verification, or the relevant docs/scripts clearly require local staging.
+- GitHub-side packaging still must obey the version/tag rules above. If the correct workflow, tag, branch, or version is unclear, stop and verify the release identifier before triggering packaging.
 
 ## Prompt Governance
 
@@ -103,6 +256,14 @@
 - `docs/releases/release-notes.md`, `README.md` `## 最新更新`, release summaries, and other user-facing update records should continue to use the existing date-first format, for example: `### 2026-04-07`.
 - Keep the date as the primary update identifier until the product workflow, information architecture, and release cadence are stable enough to justify a formal versioning system.
 - If multiple user-visible updates are recorded on the same date, keep them under the same date heading in `docs/releases/release-notes.md` and distinguish them by clear summary text instead of inventing temporary version numbers.
+
+## Current Product Priorities
+
+1. Stabilize auto-director recovery and chapter production chain.
+2. Keep beginner-first full-novel completion as the main product goal.
+3. Avoid introducing new workflow branches unless they simplify the main production path.
+4. Prefer fixing runtime contracts, prompt schemas, and state projections before adding UI-only patches.
+5. Do not expand Creative Hub into a general chat tool unless it directly supports novel completion.
 
 ### Future Versioning Transition
 

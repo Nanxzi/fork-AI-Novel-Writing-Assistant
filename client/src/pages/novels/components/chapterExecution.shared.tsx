@@ -6,6 +6,10 @@ import type {
 } from "@ai-novel/shared/types/novel";
 import type { ChapterRuntimePackage } from "@ai-novel/shared/types/chapterRuntime";
 import { parseChapterScenePlan } from "@ai-novel/shared/types/chapterLengthControl";
+import {
+  classifyChapterQualityLoopRisk,
+  hasContinuableChapterQualityLoopRiskFlags,
+} from "@ai-novel/shared/types/chapterQualityLoop";
 import { Link } from "react-router-dom";
 import AiButton from "@/components/common/AiButton";
 import AiActionLabel from "@/components/common/AiActionLabel";
@@ -23,7 +27,7 @@ export type ChapterExecutionFlowStageKey =
   | "payoff_sync"
   | "ready";
 export type ChapterExecutionFlowStageStatus = "not_started" | "in_progress" | "done";
-export type ChapterExecutionBackgroundActivityKind = "character_dynamics" | "state_snapshot" | "payoff_ledger";
+export type ChapterExecutionBackgroundActivityKind = "character_dynamics" | "state_snapshot" | "payoff_ledger" | "character_resources";
 export type ChapterExecutionBackgroundActivityStatus = "running" | "failed";
 
 export interface ChapterExecutionBackgroundActivity {
@@ -109,6 +113,20 @@ function hasRuntimeLedgerData(runtimePackage: ChapterRuntimePackage | null | und
   );
 }
 
+function hasRuntimeResourceData(runtimePackage: ChapterRuntimePackage | null | undefined): boolean {
+  const context = runtimePackage?.context.characterResourceContext;
+  return Boolean(
+    context
+    && (
+      context.availableItems.length > 0
+      || context.setupNeededItems.length > 0
+      || context.blockedItems.length > 0
+      || context.pendingReviewItems.length > 0
+      || context.riskSignals.length > 0
+    ),
+  );
+}
+
 function buildCurrentStageNote(stage: ChapterExecutionFlowStage): string {
   switch (stage.key) {
     case "execution_plan":
@@ -129,18 +147,18 @@ function buildCurrentStageNote(stage: ChapterExecutionFlowStage): string {
         : "如果审核发现问题，这里会进入修复阶段。";
     case "state_sync":
       return stage.status === "in_progress"
-        ? "系统正在同步本章状态快照与角色变化。"
-        : "正文处理完成后，系统会同步本章状态。";
+        ? "正文可读，系统正在回灌本章状态、角色变化和关键资源。"
+        : "正文可读后，系统会回灌本章状态和关键资源。";
     case "payoff_sync":
       return stage.status === "in_progress"
-        ? "系统正在回填本章涉及的伏笔状态。"
-        : "状态同步完成后，系统会继续更新伏笔账本。";
+        ? "系统正在校准本章涉及的伏笔账本。"
+        : "资产回灌后，系统会按风险和节奏校准伏笔账本。";
     case "ready":
     default:
       return stage.status === "done"
         ? "这章已经达到可继续推进的状态。"
         : stage.status === "in_progress"
-          ? "这章正在等待你确认是否继续推进。"
+          ? "这章已经完成当前轮审核。你可以继续编辑，也可以先处理建议。"
           : "完成前面步骤后，这章就可以继续推进。";
   }
 }
@@ -175,7 +193,7 @@ export function resolveChapterExecutionFlow(input: ResolveChapterExecutionFlowIn
         return {
           key,
           label,
-          status: chapter.taskSheet?.trim() || chapter.sceneCards?.trim() || chapter.expectation?.trim()
+          status: chapter.taskSheet?.trim() || chapter.sceneCards?.trim()
             ? "done"
             : "not_started",
         };
@@ -183,7 +201,7 @@ export function resolveChapterExecutionFlow(input: ResolveChapterExecutionFlowIn
         return {
           key,
           label,
-          status: isCurrentChapterWriting
+          status: isCurrentChapterWriting || chapter.chapterStatus === "generating"
             ? "in_progress"
             : chapter.content?.trim()
               ? "done"
@@ -214,8 +232,9 @@ export function resolveChapterExecutionFlow(input: ResolveChapterExecutionFlowIn
           key,
           label,
           status: hasBackgroundActivity(input.backgroundActivities, "state_snapshot", chapterId)
+            || hasBackgroundActivity(input.backgroundActivities, "character_resources", chapterId)
             ? "in_progress"
-            : currentStateSnapshot
+            : (currentStateSnapshot || hasRuntimeResourceData(input.chapterRuntimePackage))
               ? "done"
               : "not_started",
         };
@@ -261,10 +280,22 @@ export function resolveDisplayedChapterStatus(chapter: Chapter): Chapter["chapte
   if (!hasText(chapter.content)) {
     return status;
   }
+  if (chapter.generationState === "approved" || chapter.generationState === "published") {
+    return "completed";
+  }
+  if (
+    chapterHasContinuableQualityLoop(chapter)
+    && (chapter.generationState === "reviewed" || chapter.generationState === "repaired")
+  ) {
+    return "pending_review";
+  }
+  if (status === "generating" && (chapter.generationState === "reviewed" || chapter.generationState === "repaired")) {
+    return "pending_review";
+  }
+  if (status === "needs_repair" && chapterHasContinuableQualityLoop(chapter)) {
+    return "pending_review";
+  }
   if (status === "pending_generation") {
-    if (chapter.generationState === "approved" || chapter.generationState === "published") {
-      return "completed";
-    }
     return "pending_review";
   }
   return status;
@@ -279,9 +310,9 @@ export function chapterStatusLabel(status?: Chapter["chapterStatus"] | null): st
     case "generating":
       return "写作中";
     case "pending_review":
-      return "待确认";
+      return "已审校";
     case "needs_repair":
-      return "待修复";
+      return "建议修复";
     case "completed":
       return "已完成";
     default:
@@ -298,9 +329,9 @@ export function chapterStatusDescription(status?: Chapter["chapterStatus"] | nul
     case "generating":
       return "写作中：AI 正在生成本章正文，或正在做生成后的收尾处理。";
     case "pending_review":
-      return "待确认：正文已经进入确认阶段，建议查看审校结果并决定是否继续修复或确认通过。";
+      return "已审校：正文已经完成当前轮审核。你可以查看建议、直接继续编辑，或按需处理问题。";
     case "needs_repair":
-      return "待修复：审校发现了问题，建议先修复再继续推进。";
+      return "建议修复：审核发现了问题，但不会阻止继续编辑。你可以一键修复，也可以先继续写。";
     case "completed":
       return "已完成：本章已通过当前流程，可以继续润色或进入下一章。";
     default:
@@ -350,9 +381,110 @@ export function shouldShowGenerationStateBadge(state?: Chapter["generationState"
   return Boolean(state && state !== "planned");
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function stringifyRiskLabel(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function qualityLoopActionLabel(value: unknown): string | null {
+  switch (value) {
+    case "continue":
+      return "质量可继续";
+    case "patch_repair":
+      return "建议补写修复";
+    case "replan":
+      return "建议重规划";
+    case "manual_gate":
+      return "需要确认修复边界";
+    default:
+      return null;
+  }
+}
+
+function qualityLoopStatusLabel(value: unknown): string | null {
+  switch (value) {
+    case "risk":
+      return "质量有风险";
+    case "invalid":
+      return "质量需修复";
+    case "missing":
+      return "质量信息缺失";
+    default:
+      return null;
+  }
+}
+
+function qualityLoopArtifactLabel(value: unknown): string | null {
+  switch (value) {
+    case "chapter_retention_contract":
+      return "留存风险";
+    case "continuity_state":
+      return "连贯性风险";
+    case "rolling_window_review":
+      return "章节衔接风险";
+    default:
+      return null;
+  }
+}
+
+function parseStructuredRiskFlagsObject(input: string): Record<string, unknown> | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(input);
+  } catch {
+    return null;
+  }
+  return isRecord(parsed) ? parsed : null;
+}
+
+export function chapterHasContinuableQualityLoop(chapter: Pick<Chapter, "riskFlags">): boolean {
+  return hasContinuableChapterQualityLoopRiskFlags(chapter.riskFlags);
+}
+
+function parseStructuredRiskFlags(input: string): string[] | null {
+  const parsed = parseStructuredRiskFlagsObject(input);
+  if (!parsed) return null;
+  const labels: string[] = [];
+  const qualityLoop = parsed.qualityLoop;
+  if (isRecord(qualityLoop)) {
+    const qualityLoopRisk = classifyChapterQualityLoopRisk(qualityLoop);
+    if (qualityLoopRisk === "non_blocking_quality_debt") {
+      labels.push("已记录质量债务");
+    } else {
+      const actionLabel = qualityLoopActionLabel(qualityLoop.recommendedAction);
+      const statusLabel = qualityLoopStatusLabel(qualityLoop.overallStatus);
+      if (actionLabel) labels.push(actionLabel);
+      if (statusLabel) labels.push(statusLabel);
+    }
+    const signals = Array.isArray(qualityLoop.signals) ? qualityLoop.signals : [];
+    signals.forEach((signal) => {
+      if (!isRecord(signal) || signal.status === "valid") {
+        return;
+      }
+      const label = qualityLoopArtifactLabel(signal.artifactType);
+      if (label) {
+        labels.push(label);
+      }
+    });
+  }
+  const extraLabels = Object.entries(parsed)
+    .filter(([key]) => key !== "qualityLoop")
+    .flatMap(([, value]) => Array.isArray(value) ? value : [value])
+    .map(stringifyRiskLabel)
+    .filter((value): value is string => Boolean(value));
+  return Array.from(new Set([...labels, ...extraLabels])).slice(0, 4);
+}
+
 export function parseRiskFlags(input: string | null | undefined): string[] {
   if (!input?.trim()) {
     return [];
+  }
+  const structured = parseStructuredRiskFlags(input.trim());
+  if (structured) {
+    return structured;
   }
   return input
     .split(/[\n,，;；|]/g)
@@ -396,12 +528,15 @@ export function resolveChapterQueuePreview(chapter: Chapter): string {
 }
 
 export function chapterSuggestedActionLabel(chapter: Chapter): string {
+  if (chapterHasContinuableQualityLoop(chapter)) {
+    return hasText(chapter.content) ? "继续下一章" : "写本章";
+  }
   const status = resolveDisplayedChapterStatus(chapter);
   if (status === "generating") return "等待生成";
-  if (status === "needs_repair") return "修复问题";
+  if (status === "needs_repair") return "一键修复";
   if (status === "pending_review") {
     return chapter.generationState === "reviewed" || chapter.generationState === "approved"
-      ? "确认结果"
+      ? "查看建议"
       : "运行审校";
   }
   if (status === "completed") return "继续润色";

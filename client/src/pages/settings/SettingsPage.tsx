@@ -1,86 +1,59 @@
 import { useMemo, useState } from "react";
-import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import type { ApiResponse } from "@ai-novel/shared/types/api";
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
 import {
+  type APIKeyStatus,
   createCustomProvider,
   deleteCustomProvider,
   getAPIKeySettings,
   getProviderBalances,
-  getRagSettings,
+  previewCustomProviderModels,
   refreshProviderBalance,
   refreshProviderModelList,
   saveAPIKeySetting,
   testLLMConnection,
 } from "@/api/settings";
 import { queryKeys } from "@/api/queryKeys";
-import SearchableSelect from "@/components/common/SearchableSelect";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
+import DesktopLegacyDataImportCard from "@/components/layout/DesktopLegacyDataImportCard";
+import DesktopUpdateCard from "@/components/layout/DesktopUpdateCard";
+import AutoDirectorSettingsSection from "./AutoDirectorSettingsSection";
+import { ProviderRequestLimitSummary } from "./components/ProviderRequestLimitFields";
+import SettingsNavigationCards from "./components/SettingsNavigationCards";
+import ProviderConfigDialog, { type ProviderFormState } from "./components/ProviderConfigDialog";
+import StyleEngineRuntimeSettingsCard from "./components/StyleEngineRuntimeSettingsCard";
+import SettingsActionResult from "./SettingsActionResult";
+import { formatBalanceAmount, formatBalanceTime } from "./settingsFormatters";
+import { AUTO_DIRECTOR_MOBILE_CLASSES } from "@/mobile/autoDirector";
 
 const MODEL_BADGE_COLLAPSE_COUNT = 8;
-
-function formatBalanceAmount(amount: number | null | undefined, currency: string | null | undefined): string {
-  if (typeof amount !== "number" || Number.isNaN(amount)) {
-    return "-";
-  }
-  if (currency) {
-    try {
-      return new Intl.NumberFormat("zh-CN", {
-        style: "currency",
-        currency,
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2,
-      }).format(amount);
-    } catch {
-      // Fall through to plain numeric output for unsupported currency codes.
-    }
-  }
-  return new Intl.NumberFormat("zh-CN", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(amount);
-}
-
-function formatBalanceTime(value: string | null | undefined): string {
-  if (!value) {
-    return "-";
-  }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return "-";
-  }
-  return date.toLocaleString("zh-CN", {
-    hour12: false,
-  });
-}
 
 export default function SettingsPage() {
   const queryClient = useQueryClient();
   const [editingProvider, setEditingProvider] = useState("");
   const [isCreatingCustomProvider, setIsCreatingCustomProvider] = useState(false);
   const [expandedProviders, setExpandedProviders] = useState<Record<string, boolean>>({});
-  const [form, setForm] = useState({
+  const [form, setForm] = useState<ProviderFormState>({
     displayName: "",
     key: "",
     model: "",
+    imageModel: "",
     baseURL: "",
+    concurrencyLimit: "0",
+    requestIntervalMs: "0",
   });
   const [testResult, setTestResult] = useState("");
   const [actionResult, setActionResult] = useState("");
+  const [previewModels, setPreviewModels] = useState<string[]>([]);
+  const [previewModelsResult, setPreviewModelsResult] = useState("");
 
   const apiKeySettingsQuery = useQuery({
     queryKey: queryKeys.settings.apiKeys,
     queryFn: getAPIKeySettings,
-  });
-
-  const ragSettingsQuery = useQuery({
-    queryKey: queryKeys.settings.rag,
-    queryFn: getRagSettings,
   });
 
   const providerBalancesQuery = useQuery({
@@ -103,14 +76,47 @@ export default function SettingsPage() {
       displayName: "",
       key: "",
       model: "",
+      imageModel: "",
       baseURL: "",
+      concurrencyLimit: "0",
+      requestIntervalMs: "0",
     });
     setTestResult("");
+    setPreviewModels([]);
+    setPreviewModelsResult("");
   };
 
   const invalidateProviderQueries = async () => {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: queryKeys.settings.apiKeys }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.settings.apiKeyBalances }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.settings.rag }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.llm.providers }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.settings.modelRoutes }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.settings.modelRouteConnectivity }),
+    ]);
+  };
+
+  const updateProviderModelsInCache = (provider: string, models: string[], currentModel: string) => {
+    queryClient.setQueryData<ApiResponse<APIKeyStatus[]>>(queryKeys.settings.apiKeys, (previous) => {
+      if (!previous?.data) {
+        return previous;
+      }
+      return {
+        ...previous,
+        data: previous.data.map((item) => item.provider === provider
+          ? {
+            ...item,
+            models,
+            currentModel,
+          }
+          : item),
+      };
+    });
+  };
+
+  const invalidateProviderAuxiliaryQueries = async () => {
+    await Promise.all([
       queryClient.invalidateQueries({ queryKey: queryKeys.settings.apiKeyBalances }),
       queryClient.invalidateQueries({ queryKey: queryKeys.settings.rag }),
       queryClient.invalidateQueries({ queryKey: queryKeys.llm.providers }),
@@ -125,13 +131,19 @@ export default function SettingsPage() {
       displayName?: string;
       key?: string;
       model?: string;
+      imageModel?: string;
       baseURL?: string;
+      concurrencyLimit?: number;
+      requestIntervalMs?: number;
     }) =>
       saveAPIKeySetting(payload.provider, {
         displayName: payload.displayName,
         key: payload.key,
         model: payload.model,
+        imageModel: payload.imageModel,
         baseURL: payload.baseURL,
+        concurrencyLimit: payload.concurrencyLimit,
+        requestIntervalMs: payload.requestIntervalMs,
       }),
     onSuccess: async (response) => {
       resetDialogState();
@@ -147,8 +159,11 @@ export default function SettingsPage() {
     mutationFn: (payload: {
       name: string;
       key?: string;
-      model: string;
+      model?: string;
+      imageModel?: string;
       baseURL: string;
+      concurrencyLimit?: number;
+      requestIntervalMs?: number;
     }) =>
       createCustomProvider(payload),
     onSuccess: async (response) => {
@@ -158,6 +173,23 @@ export default function SettingsPage() {
     },
     onError: (error) => {
       setActionResult(error instanceof Error ? error.message : "创建自定义厂商失败。");
+    },
+  });
+
+  const previewCustomProviderModelsMutation = useMutation({
+    mutationFn: (payload: { key?: string; baseURL: string }) => previewCustomProviderModels(payload),
+    onSuccess: (response) => {
+      const models = response.data?.models ?? [];
+      setPreviewModels(models);
+      setPreviewModelsResult(response.message ?? `已获取 ${models.length} 个模型。`);
+      setForm((prev) => ({
+        ...prev,
+        model: prev.model.trim() || models[0] || "",
+      }));
+    },
+    onError: (error) => {
+      setPreviewModels([]);
+      setPreviewModelsResult(error instanceof Error ? error.message : "获取模型列表失败。");
     },
   });
 
@@ -207,8 +239,11 @@ export default function SettingsPage() {
     onSuccess: async (response, provider) => {
       const count = response.data?.models?.length ?? 0;
       const providerName = providerConfigs.find((item) => item.provider === provider)?.name ?? provider;
+      if (response.data) {
+        updateProviderModelsInCache(response.data.provider, response.data.models, response.data.currentModel);
+      }
       setActionResult(`${providerName} 模型列表已刷新（${count} 个）。`);
-      await invalidateProviderQueries();
+      await invalidateProviderAuxiliaryQueries();
     },
     onError: (error) => {
       setActionResult(error instanceof Error ? error.message : "刷新模型列表失败。");
@@ -246,11 +281,8 @@ export default function SettingsPage() {
     () => new Map((providerBalancesQuery.data?.data ?? []).map((item) => [item.provider, item])),
     [providerBalancesQuery.data?.data],
   );
-  const ragSettings = ragSettingsQuery.data?.data;
-  const ragProvider = useMemo(
-    () => ragSettings?.providers.find((item) => item.provider === ragSettings.embeddingProvider),
-    [ragSettings],
-  );
+  const modelOptions = editingConfig?.models ?? [];
+  const selectableModels = isCreatingCustomProvider ? previewModels : modelOptions;
 
   const isProviderExpanded = (provider: string) => expandedProviders[provider] === true;
   const toggleProviderExpanded = (provider: string) => {
@@ -271,10 +303,15 @@ export default function SettingsPage() {
       displayName: config.displayName ?? config.name,
       key: "",
       model: config.currentModel,
+      imageModel: config.currentImageModel ?? config.defaultImageModel ?? "",
       baseURL: config.currentBaseURL,
+      concurrencyLimit: String(config.concurrencyLimit ?? 0),
+      requestIntervalMs: String(config.requestIntervalMs ?? 0),
     });
     setTestResult("");
     setActionResult("");
+    setPreviewModels([]);
+    setPreviewModelsResult("");
   };
 
   const openCreateCustomDialog = () => {
@@ -284,10 +321,15 @@ export default function SettingsPage() {
       displayName: "",
       key: "",
       model: "",
+      imageModel: "",
       baseURL: "",
+      concurrencyLimit: "0",
+      requestIntervalMs: "0",
     });
     setTestResult("");
     setActionResult("");
+    setPreviewModels([]);
+    setPreviewModelsResult("");
   };
 
   const canRefreshBalance = (provider: LLMProvider, kind: "builtin" | "custom", isConfigured: boolean) => {
@@ -298,67 +340,97 @@ export default function SettingsPage() {
     return Boolean(balance?.canRefresh ?? (provider === "deepseek" || provider === "siliconflow" || provider === "kimi"));
   };
 
+  const clearPreviewModels = () => {
+    setPreviewModels([]);
+    setPreviewModelsResult("");
+  };
+
+  const handlePreviewCustomModels = () => {
+    setPreviewModelsResult("");
+    previewCustomProviderModelsMutation.mutate({
+      key: form.key.trim() ? form.key : undefined,
+      baseURL: form.baseURL.trim(),
+    });
+  };
+
+  const handleSubmitProviderDialog = () => {
+    if (isCreatingCustomProvider) {
+      createCustomProviderMutation.mutate({
+        name: form.displayName.trim(),
+        key: form.key.trim() ? form.key : undefined,
+        model: form.model.trim() || undefined,
+        imageModel: form.imageModel.trim(),
+        baseURL: form.baseURL.trim(),
+        concurrencyLimit: Number.parseInt(form.concurrencyLimit, 10) || 0,
+        requestIntervalMs: Number.parseInt(form.requestIntervalMs, 10) || 0,
+      });
+      return;
+    }
+    if (!editingProvider) {
+      return;
+    }
+    saveMutation.mutate({
+      provider: editingProvider,
+      displayName: isCustomDialog ? form.displayName.trim() || undefined : undefined,
+      key: form.key.trim() ? form.key : undefined,
+      model: form.model.trim() || undefined,
+      imageModel: form.imageModel.trim(),
+      baseURL: form.baseURL,
+      concurrencyLimit: Number.parseInt(form.concurrencyLimit, 10) || 0,
+      requestIntervalMs: Number.parseInt(form.requestIntervalMs, 10) || 0,
+    });
+  };
+
+  const handleTestProviderDialog = () => {
+    testMutation.mutate({
+      provider: editingProvider || "custom_preview",
+      apiKey: form.key.trim() ? form.key : undefined,
+      model: form.model.trim() || undefined,
+      baseURL: form.baseURL.trim() ? form.baseURL : undefined,
+      probeMode: "both",
+    });
+  };
+
+  const handleDeleteCustomProvider = () => {
+    if (!editingProvider || !editingConfig) {
+      return;
+    }
+    if (!window.confirm(`确认删除自定义厂商 ${editingConfig.name} 吗？`)) {
+      return;
+    }
+    deleteCustomProviderMutation.mutate(editingProvider);
+  };
+
+  const isSavingProvider = saveMutation.isPending || createCustomProviderMutation.isPending;
+  const providerSubmitDisabled = isSavingProvider
+    || previewCustomProviderModelsMutation.isPending
+    || (!isCreatingCustomProvider && !form.model.trim())
+    || (isCustomDialog && !form.displayName.trim())
+    || (isCreatingCustomProvider && !form.baseURL.trim())
+    || (!isCustomDialog && editingConfig?.requiresApiKey !== false && !form.key.trim() && !editingConfig?.isConfigured);
+  const providerSubmitLabel = isSavingProvider ? "保存中..." : isCreatingCustomProvider ? "创建厂商" : "保存";
+
   return (
-    <div className="space-y-4">
-      <Card>
-        <CardHeader>
-          <CardTitle>Embedding Settings Moved</CardTitle>
-          <CardDescription>
-            Embedding provider and model configuration now live in the knowledge module.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="grid gap-3 md:grid-cols-2">
-            <div className="rounded-md border p-3">
-              <div className="text-xs text-muted-foreground">Current embedding provider</div>
-              <div className="mt-1 font-medium">{ragProvider?.name ?? ragSettings?.embeddingProvider ?? "-"}</div>
-            </div>
-            <div className="rounded-md border p-3">
-              <div className="text-xs text-muted-foreground">Current embedding model</div>
-              <div className="mt-1 font-medium">{ragSettings?.embeddingModel ?? "-"}</div>
-            </div>
-          </div>
-          <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
-            <span>Status</span>
-            <Badge variant={ragProvider?.isConfigured ? "default" : "outline"}>
-              {ragProvider?.isConfigured ? "API key ready" : "API key missing"}
-            </Badge>
-            <Badge variant={ragProvider?.isActive ? "default" : "outline"}>
-              {ragProvider?.isActive ? "Active" : "Inactive"}
-            </Badge>
-          </div>
-          <Button asChild>
-            <Link to="/knowledge?tab=settings">Open knowledge settings</Link>
-          </Button>
-        </CardContent>
-      </Card>
+    <div className={AUTO_DIRECTOR_MOBILE_CLASSES.settingsPageRoot}>
+      <DesktopUpdateCard />
+      <DesktopLegacyDataImportCard forceVisible />
 
-      <Card>
-        <CardHeader>
-          <CardTitle>模型路由</CardTitle>
-          <CardDescription>把不同写作角色分配给不同模型，建议在独立页面集中管理。</CardDescription>
-        </CardHeader>
-        <CardContent className="flex items-center justify-between gap-3">
-          <div className="text-sm text-muted-foreground">
-            现在模型路由已经独立成管理页，支持按角色单独配置服务商和模型。
-          </div>
-          <Button asChild>
-            <Link to="/settings/model-routes">进入模型路由管理</Link>
-          </Button>
-        </CardContent>
-      </Card>
+      <SettingsNavigationCards />
+      <StyleEngineRuntimeSettingsCard />
 
-      <Card>
-        <CardHeader className="flex flex-row items-start justify-between gap-3">
-          <div className="space-y-1">
-            <CardTitle>Model Providers</CardTitle>
-            <CardDescription>
-              管理内置厂商连接，也可以新增 OpenAI-compatible 自定义厂商。
+      <AutoDirectorSettingsSection onActionResult={setActionResult} />
+
+      <Card className="min-w-0 overflow-hidden">
+        <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="min-w-0 space-y-1">
+            <CardTitle>模型厂商</CardTitle>
+            <CardDescription className="break-words [overflow-wrap:anywhere]">
+              管理内置厂商连接，也可以新增 OpenAI 兼容的自定义厂商。
             </CardDescription>
           </div>
-          <Button onClick={openCreateCustomDialog}>新增自定义厂商</Button>
+          <Button className="w-full sm:w-auto" onClick={openCreateCustomDialog}>新增自定义厂商</Button>
         </CardHeader>
-        <CardContent className="grid gap-3 md:grid-cols-2">
+        <CardContent className="grid min-w-0 gap-3 md:grid-cols-2">
           {providerConfigs.map((item) => {
             const balance = providerBalanceMap.get(item.provider);
             const isBalanceRefreshing = refreshBalanceMutation.isPending && refreshBalanceMutation.variables === item.provider;
@@ -369,36 +441,45 @@ export default function SettingsPage() {
             return (
               <div
                 key={item.provider}
-                className={`rounded-md border p-3 transition-colors ${
+                className={`min-w-0 rounded-md border p-3 transition-colors ${
                   item.isConfigured
                     ? "border-emerald-500/40 bg-emerald-50/50 dark:bg-emerald-950/20"
                     : "border-border"
                 }`}
               >
-                <div className="mb-2 flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
-                    <div className="font-medium">{item.name}</div>
+                <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex min-w-0 flex-wrap items-center gap-2">
+                    <div className="break-words font-medium [overflow-wrap:anywhere]">{item.name}</div>
                     {item.kind === "custom" ? <Badge variant="outline">自定义</Badge> : null}
                   </div>
                   <Badge
                     variant={item.isConfigured ? "default" : "outline"}
                     className={item.isConfigured ? "bg-emerald-600 text-white hover:bg-emerald-600" : ""}
                   >
-                    {item.isConfigured ? "Configured" : "Not configured"}
+                    {item.isConfigured ? "已配置" : "未配置"}
                   </Badge>
                 </div>
-                <div className="mb-2 text-xs text-muted-foreground">Current model: {item.currentModel || "-"}</div>
-                <div className="mb-2 text-xs text-muted-foreground">API URL: {item.currentBaseURL || "-"}</div>
-                <div className="mb-3 flex items-center justify-between rounded-md border bg-background/60 px-3 py-2">
-                  <div className="space-y-1">
+                <div className="mb-2 break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">模型：{item.currentModel || "-"}</div>
+                {item.supportsImageGeneration ? (
+                  <div className="mb-2 break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">
+                    图像模型：{item.currentImageModel || item.defaultImageModel || "-"}
+                  </div>
+                ) : null}
+                <div className="mb-2 break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">API 地址：{item.currentBaseURL || "-"}</div>
+                <ProviderRequestLimitSummary
+                  concurrencyLimit={item.concurrencyLimit}
+                  requestIntervalMs={item.requestIntervalMs}
+                />
+                <div className="mb-3 flex flex-col gap-3 rounded-md border bg-background/60 px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="min-w-0 space-y-1">
                     <div className="text-xs font-medium text-muted-foreground">思考功能</div>
-                    <div className="text-xs text-muted-foreground">
+                    <div className="break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">
                       {item.reasoningEnabled
                         ? "当前会返回并展示模型思考内容。"
                         : "当前会隐藏思考内容；MiniMax 会自动启用分离与清洗，避免 <think> 泄漏到正文。"}
                     </div>
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex shrink-0 items-center gap-2">
                     <span className="text-xs text-muted-foreground">{item.reasoningEnabled ? "已开启" : "已关闭"}</span>
                     <Switch
                       checked={item.reasoningEnabled}
@@ -415,15 +496,15 @@ export default function SettingsPage() {
                 </div>
                 <div className="mb-3 rounded-md border border-dashed bg-background/60 p-3">
                   {item.kind === "custom" ? (
-                    <div className="space-y-1">
+                    <div className="space-y-1 break-words [overflow-wrap:anywhere]">
                       <div className="text-xs font-medium text-muted-foreground">余额</div>
                       <div className="text-sm text-muted-foreground">
-                        自定义 OpenAI-compatible 厂商暂不接入余额查询。
+                        自定义 OpenAI 兼容厂商暂不接入余额查询。
                       </div>
                     </div>
                   ) : (
                     <>
-                      <div className="mb-2 flex items-center justify-between gap-2">
+                      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                         <div className="text-xs font-medium text-muted-foreground">余额</div>
                         {balance?.status === "available" ? (
                           <Badge variant="outline">最近刷新 {formatBalanceTime(balance.fetchedAt)}</Badge>
@@ -436,7 +517,7 @@ export default function SettingsPage() {
                           <div className="text-lg font-semibold">
                             {formatBalanceAmount(balance.availableBalance, balance.currency)}
                           </div>
-                          <div className="grid gap-2 text-xs text-muted-foreground sm:grid-cols-2">
+                          <div className="grid gap-2 text-xs text-muted-foreground sm:grid-cols-2 break-words [overflow-wrap:anywhere]">
                             {balance.cashBalance !== null ? <div>现金余额：{formatBalanceAmount(balance.cashBalance, balance.currency)}</div> : null}
                             {balance.voucherBalance !== null ? <div>代金券余额：{formatBalanceAmount(balance.voucherBalance, balance.currency)}</div> : null}
                             {balance.chargeBalance !== null ? <div>充值余额：{formatBalanceAmount(balance.chargeBalance, balance.currency)}</div> : null}
@@ -446,7 +527,7 @@ export default function SettingsPage() {
                         </div>
                       ) : (
                         <div className="space-y-1">
-                          <div className="text-sm text-muted-foreground">
+                          <div className="break-words text-sm text-muted-foreground [overflow-wrap:anywhere]">
                             {balance?.error ?? balance?.message ?? (item.isConfigured ? "当前暂未获取余额信息。" : "请先配置 API Key。")}
                           </div>
                         </div>
@@ -455,7 +536,7 @@ export default function SettingsPage() {
                   )}
                 </div>
                 <div className="mb-3 space-y-2">
-                  <div className="flex flex-wrap gap-1">
+                  <div className="flex min-w-0 flex-wrap gap-1">
                     {(isProviderExpanded(item.provider)
                       ? item.models
                       : item.models.slice(0, MODEL_BADGE_COLLAPSE_COUNT)
@@ -463,7 +544,9 @@ export default function SettingsPage() {
                       <Badge
                         key={model}
                         variant={model === item.currentModel ? "default" : "outline"}
-                        className={model === item.currentModel ? "bg-primary" : ""}
+                        className={model === item.currentModel
+                          ? "max-w-full whitespace-normal break-words bg-primary text-left [overflow-wrap:anywhere]"
+                          : "max-w-full whitespace-normal break-words text-left [overflow-wrap:anywhere]"}
                       >
                         {model}
                       </Badge>
@@ -481,13 +564,14 @@ export default function SettingsPage() {
                     </button>
                   ) : null}
                 </div>
-                <div className="flex flex-wrap gap-2">
-                  <Button size="sm" onClick={() => openBuiltInDialog(item.provider)}>
-                    {item.kind === "custom" ? "编辑" : "Configure"}
+                <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap">
+                  <Button size="sm" className="w-full sm:w-auto" onClick={() => openBuiltInDialog(item.provider)}>
+                    {item.kind === "custom" ? "编辑" : "配置"}
                   </Button>
                   <Button
                     size="sm"
                     variant="secondary"
+                    className="w-full sm:w-auto"
                     onClick={() => {
                       setTestResult("");
                       testMutation.mutate({
@@ -498,11 +582,12 @@ export default function SettingsPage() {
                     }}
                     disabled={testMutation.isPending}
                   >
-                    Test
+                    测试连接
                   </Button>
                   <Button
                     size="sm"
                     variant="outline"
+                    className="w-full sm:w-auto"
                     onClick={() => {
                       setActionResult("");
                       refreshModelsMutation.mutate(item.provider);
@@ -510,20 +595,21 @@ export default function SettingsPage() {
                     disabled={!item.isConfigured || refreshModelsMutation.isPending}
                   >
                     {refreshModelsMutation.isPending && refreshModelsMutation.variables === item.provider
-                      ? "Refreshing..."
-                      : "Refresh models"}
+                      ? "刷新中..."
+                      : "刷新模型"}
                   </Button>
                   {item.kind === "builtin" ? (
                     <Button
                       size="sm"
                       variant="outline"
+                      className="w-full sm:w-auto"
                       onClick={() => {
                         setActionResult("");
                         refreshBalanceMutation.mutate(item.provider);
                       }}
                       disabled={!refreshBalanceEnabled || isBalanceRefreshing}
                     >
-                      {isBalanceRefreshing ? "Refreshing balance..." : "刷新余额"}
+                      {isBalanceRefreshing ? "余额刷新中..." : "刷新余额"}
                     </Button>
                   ) : null}
                 </div>
@@ -533,154 +619,35 @@ export default function SettingsPage() {
         </CardContent>
       </Card>
 
-      {actionResult ? <div className="text-sm text-muted-foreground">{actionResult}</div> : null}
+      <SettingsActionResult message={actionResult} />
 
-      <Dialog
+      <ProviderConfigDialog
         open={isDialogOpen}
         onOpenChange={(open) => {
           if (!open) {
             resetDialogState();
           }
         }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>
-              {isCreatingCustomProvider
-                ? "新增自定义厂商"
-                : isCustomDialog
-                  ? "编辑自定义厂商"
-                  : "Configure Model Provider"}
-            </DialogTitle>
-          </DialogHeader>
-          <div className="space-y-3">
-            {isCustomDialog ? (
-              <div className="space-y-1">
-                <div className="text-xs text-muted-foreground">厂商名称</div>
-                <Input
-                  value={form.displayName}
-                  placeholder="例如：My Gateway"
-                  onChange={(event) => setForm((prev) => ({ ...prev, displayName: event.target.value }))}
-                />
-              </div>
-            ) : null}
-
-            {(isCustomDialog || editingConfig?.requiresApiKey === false) ? (
-              <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-                这一项支持本地或免密接入，API Key 可以留空；重点配置模型名和 API URL。
-              </div>
-            ) : null}
-
-            <Input
-              type="password"
-              value={form.key}
-              placeholder={editingConfig?.isConfigured ? "留空则沿用当前已保存的 API Key" : "Enter API key"}
-              onChange={(event) => setForm((prev) => ({ ...prev, key: event.target.value }))}
-            />
-
-            <div className="space-y-1">
-              <div className="text-xs text-muted-foreground">Available models</div>
-              <SearchableSelect
-                value={form.model}
-                onValueChange={(value) => setForm((prev) => ({ ...prev, model: value }))}
-                options={(editingConfig?.models ?? []).map((model) => ({ value: model }))}
-                placeholder="Select a model"
-                searchPlaceholder="Search models"
-                emptyText="No models available"
-              />
-            </div>
-
-            <Input
-              value={form.model}
-              placeholder="也可以直接手动输入模型名"
-              onChange={(event) => setForm((prev) => ({ ...prev, model: event.target.value }))}
-            />
-
-            <div className="space-y-1">
-              <div className="text-xs text-muted-foreground">API URL</div>
-              <Input
-                value={form.baseURL}
-                placeholder={editingConfig?.defaultBaseURL ?? "https://api.example.com/v1"}
-                onChange={(event) => setForm((prev) => ({ ...prev, baseURL: event.target.value }))}
-              />
-              <div className="text-xs text-muted-foreground">
-                本地 Ollama 常见地址是 `http://127.0.0.1:11434/v1`。留空会回退到当前默认地址。
-              </div>
-            </div>
-
-            <div className="flex flex-wrap gap-2">
-              <Button
-                onClick={() => {
-                  if (isCreatingCustomProvider) {
-                    createCustomProviderMutation.mutate({
-                      name: form.displayName.trim(),
-                      key: form.key.trim() ? form.key : undefined,
-                      model: form.model.trim(),
-                      baseURL: form.baseURL.trim(),
-                    });
-                    return;
-                  }
-                  if (!editingProvider) {
-                    return;
-                  }
-                  saveMutation.mutate({
-                    provider: editingProvider,
-                    displayName: isCustomDialog ? form.displayName.trim() || undefined : undefined,
-                    key: form.key.trim() ? form.key : undefined,
-                    model: form.model.trim() || undefined,
-                    baseURL: form.baseURL,
-                  });
-                }}
-                disabled={
-                  saveMutation.isPending
-                  || createCustomProviderMutation.isPending
-                  || !form.model.trim()
-                  || (isCustomDialog && !form.displayName.trim())
-                  || (isCreatingCustomProvider && !form.baseURL.trim())
-                  || (!isCustomDialog && editingConfig?.requiresApiKey !== false && !form.key.trim() && !editingConfig?.isConfigured)
-                }
-              >
-                {saveMutation.isPending || createCustomProviderMutation.isPending ? "Saving..." : "Save"}
-              </Button>
-
-              <Button
-                variant="secondary"
-                onClick={() =>
-                  testMutation.mutate({
-                    provider: editingProvider || "custom_preview",
-                    apiKey: form.key.trim() ? form.key : undefined,
-                    model: form.model.trim() || undefined,
-                    baseURL: form.baseURL.trim() ? form.baseURL : undefined,
-                    probeMode: "both",
-                  })
-                }
-                disabled={testMutation.isPending || !form.model.trim() || !form.baseURL.trim()}
-              >
-                Test
-              </Button>
-
-              {editingConfig?.kind === "custom" ? (
-                <Button
-                  variant="destructive"
-                  onClick={() => {
-                    if (!editingProvider) {
-                      return;
-                    }
-                    if (!window.confirm(`确认删除自定义厂商 ${editingConfig.name} 吗？`)) {
-                      return;
-                    }
-                    deleteCustomProviderMutation.mutate(editingProvider);
-                  }}
-                  disabled={deleteCustomProviderMutation.isPending}
-                >
-                  {deleteCustomProviderMutation.isPending ? "Deleting..." : "Delete"}
-                </Button>
-              ) : null}
-            </div>
-            {testResult ? <div className="text-sm text-muted-foreground">{testResult}</div> : null}
-          </div>
-        </DialogContent>
-      </Dialog>
+        isCreatingCustomProvider={isCreatingCustomProvider}
+        isCustomDialog={isCustomDialog}
+        editingConfig={editingConfig}
+        form={form}
+        setForm={setForm}
+        selectableModels={selectableModels}
+        previewModelsResult={previewModelsResult}
+        isPreviewingModels={previewCustomProviderModelsMutation.isPending}
+        onClearPreviewModels={clearPreviewModels}
+        onPreviewModels={handlePreviewCustomModels}
+        onSubmit={handleSubmitProviderDialog}
+        submitDisabled={providerSubmitDisabled}
+        submitLabel={providerSubmitLabel}
+        onTest={handleTestProviderDialog}
+        testDisabled={testMutation.isPending || !form.model.trim() || !form.baseURL.trim()}
+        testResult={testResult}
+        onDeleteCustomProvider={handleDeleteCustomProvider}
+        deleteDisabled={deleteCustomProviderMutation.isPending}
+        deleteLabel={deleteCustomProviderMutation.isPending ? "删除中..." : "删除"}
+      />
     </div>
   );
 }

@@ -35,6 +35,7 @@ const SUPPLEMENTAL_CHARACTER_GENERATION_MODE_VALUES = [
 const characterCastRoleEnum = z.enum(CHARACTER_CAST_ROLE_VALUES);
 const characterGenderEnum = z.enum(CHARACTER_GENDER_VALUES);
 const supplementalCharacterGenerationModeEnum = z.enum(SUPPLEMENTAL_CHARACTER_GENERATION_MODE_VALUES);
+const characterProhibitionsSchema = z.array(z.string().trim().min(1)).max(8).optional().default([]);
 
 function normalizeCharacterCastRole(raw: string): CharacterCastRole {
   const value = raw.trim().toLowerCase();
@@ -126,6 +127,17 @@ export const characterCastOptionMemberSchema = z.object({
   relationToProtagonist: z.string().trim().optional().default(""),
   storyFunction: nonEmptyString,
   shortDescription: z.string().trim().optional().default(""),
+  personality: z.string().trim().optional().default(""),
+  background: z.string().trim().optional().default(""),
+  development: z.string().trim().optional().default(""),
+  identityLabel: z.string().trim().optional().default(""),
+  factionLabel: z.string().trim().optional().default(""),
+  stanceLabel: z.string().trim().optional().default(""),
+  powerLevel: z.string().trim().optional().default(""),
+  realm: z.string().trim().optional().default(""),
+  currentLocation: z.string().trim().optional().default(""),
+  availability: z.string().trim().optional().default(""),
+  prohibitions: characterProhibitionsSchema,
   outerGoal: z.string().trim().optional().default(""),
   innerNeed: z.string().trim().optional().default(""),
   fear: z.string().trim().optional().default(""),
@@ -164,6 +176,18 @@ export const characterCastAutoResponseSchema = z.object({
   option: characterCastOptionSchema,
 });
 
+export const characterCastAutoMembersResponseSchema = characterCastOptionSchema.pick({
+  title: true,
+  summary: true,
+  whyItWorks: true,
+  recommendedReason: true,
+  members: true,
+});
+
+export const characterCastAutoRelationsResponseSchema = z.object({
+  relations: z.array(characterCastOptionRelationSchema).min(2).max(12),
+});
+
 export const supplementalCharacterRelationSchema = z.object({
   sourceName: nonEmptyString,
   targetName: nonEmptyString,
@@ -185,6 +209,14 @@ export const supplementalCharacterCandidateSchema = z.object({
   personality: z.string().trim().optional().default(""),
   background: z.string().trim().optional().default(""),
   development: z.string().trim().optional().default(""),
+  identityLabel: z.string().trim().optional().default(""),
+  factionLabel: z.string().trim().optional().default(""),
+  stanceLabel: z.string().trim().optional().default(""),
+  powerLevel: z.string().trim().optional().default(""),
+  realm: z.string().trim().optional().default(""),
+  currentLocation: z.string().trim().optional().default(""),
+  availability: z.string().trim().optional().default(""),
+  prohibitions: characterProhibitionsSchema,
   outerGoal: z.string().trim().optional().default(""),
   innerNeed: z.string().trim().optional().default(""),
   fear: z.string().trim().optional().default(""),
@@ -220,6 +252,8 @@ export const supplementalCharacterGenerationResponseSchema = z.object({
 export type CharacterCastOptionParsed = z.infer<typeof characterCastOptionSchema>;
 export type CharacterCastOptionResponseParsed = z.infer<typeof characterCastOptionResponseSchema>;
 export type CharacterCastAutoResponseParsed = z.infer<typeof characterCastAutoResponseSchema>;
+export type CharacterCastAutoMembersResponseParsed = z.infer<typeof characterCastAutoMembersResponseSchema>;
+export type CharacterCastAutoRelationsResponseParsed = z.infer<typeof characterCastAutoRelationsResponseSchema>;
 export type SupplementalCharacterCandidateParsed = z.infer<typeof supplementalCharacterCandidateSchema>;
 export type SupplementalCharacterGenerationInputParsed = z.infer<typeof supplementalCharacterGenerationInputSchema>;
 export type SupplementalCharacterGenerationResponseParsed = z.infer<typeof supplementalCharacterGenerationResponseSchema>;

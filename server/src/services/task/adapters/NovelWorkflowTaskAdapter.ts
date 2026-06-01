@@ -10,19 +10,19 @@ import type { ResourceRef } from "@ai-novel/shared/types/agent";
 import type { TaskStatus, UnifiedTaskDetail, UnifiedTaskSummary } from "@ai-novel/shared/types/task";
 import { prisma } from "../../../db/prisma";
 import { AppError } from "../../../middleware/errorHandler";
-import { NovelDirectorService } from "../../novel/director/NovelDirectorService";
+import { DirectorCommandService } from "../../novel/director/commands/DirectorCommandService";
 import {
   buildSkippableAutoExecutionReviewBlockingReason,
   buildSkippableAutoExecutionReviewCheckpointSummary,
   buildSkippableAutoExecutionReviewFailureSummary,
   buildSkippableAutoExecutionReviewRecoveryHint,
   isSkippableAutoExecutionReviewFailure,
-} from "../../novel/director/novelDirectorAutoExecutionFailure";
+} from "../../novel/director/automation/novelDirectorAutoExecutionFailure";
 import { NovelWorkflowService } from "../../novel/workflow/NovelWorkflowService";
 import {
   getDirectorLlmOptionsFromSeedPayload,
   type DirectorWorkflowSeedPayload,
-} from "../../novel/director/novelDirectorHelpers";
+} from "../../novel/director/runtime/novelDirectorHelpers";
 import { isAutoDirectorRecoveryInProgress } from "../../novel/workflow/novelWorkflowRecoveryHeuristics";
 import {
   buildNovelCreateResumeTarget,
@@ -150,6 +150,74 @@ function parseAutoExecutionState(seedPayloadJson?: string | null): DirectorAutoE
   return seedPayload.autoExecution as DirectorAutoExecutionState;
 }
 
+function compactObject(input: Record<string, unknown>): Record<string, unknown> | null {
+  const entries = Object.entries(input).filter(([, value]) => value !== undefined);
+  return entries.length > 0 ? Object.fromEntries(entries) : null;
+}
+
+function compactDirectorSession(input: unknown): Record<string, unknown> | null {
+  if (!input || typeof input !== "object") {
+    return null;
+  }
+  const session = input as Record<string, unknown>;
+  return compactObject({
+    phase: session.phase,
+    runMode: session.runMode,
+    reviewScope: session.reviewScope,
+    activeStepKey: session.activeStepKey,
+    checkpointType: session.checkpointType,
+  });
+}
+
+function compactSeedPayload(input: Record<string, unknown> | null): Record<string, unknown> | null {
+  if (!input) {
+    return null;
+  }
+  const autoExecution = input.autoExecution && typeof input.autoExecution === "object"
+    ? input.autoExecution as Record<string, unknown>
+    : null;
+  const styleIntentSummary = input.styleIntentSummary && typeof input.styleIntentSummary === "object"
+    ? input.styleIntentSummary as Record<string, unknown>
+    : null;
+  const takeover = input.takeover && typeof input.takeover === "object"
+    ? input.takeover as Record<string, unknown>
+    : null;
+  const downstreamReset = takeover?.downstreamReset && typeof takeover.downstreamReset === "object"
+    ? takeover.downstreamReset as Record<string, unknown>
+    : null;
+
+  return compactObject({
+    resumeTarget: input.resumeTarget,
+    runMode: input.runMode,
+    styleProfileId: input.styleProfileId,
+    styleTone: input.styleTone,
+    autoExecution: autoExecution
+      ? compactObject({
+        scopeLabel: autoExecution.scopeLabel,
+        totalChapterCount: autoExecution.totalChapterCount,
+        completedChapterCount: autoExecution.completedChapterCount,
+        mode: autoExecution.mode,
+      })
+      : undefined,
+    styleIntentSummary: styleIntentSummary
+      ? compactObject({
+        headline: styleIntentSummary.headline,
+        styleProfileName: styleIntentSummary.styleProfileName,
+        stageSummaryLines: styleIntentSummary.stageSummaryLines,
+      })
+      : undefined,
+    takeover: downstreamReset
+      ? {
+        downstreamReset: compactObject({
+          preserveAssets: downstreamReset.preserveAssets,
+          resetStatus: downstreamReset.resetStatus,
+          resetSteps: downstreamReset.resetSteps,
+        }),
+      }
+      : undefined,
+  });
+}
+
 export function normalizeWorkflowResumeTargetForCandidateSelection(input: {
   id: string;
   checkpointType: string | null;
@@ -181,6 +249,7 @@ function mapSummary(row: {
   title: string;
   lane: string;
   status: string;
+  pendingManualRecovery?: boolean | null;
   progress: number;
   currentStage: string | null;
   currentItemKey: string | null;
@@ -203,7 +272,10 @@ function mapSummary(row: {
   novel?: { title: string } | null;
   seedPayloadJson?: string | null;
 }): UnifiedTaskSummary {
-  const status = row.status as TaskStatus;
+  const pendingManualRecovery = Boolean(row.pendingManualRecovery);
+  const status = (pendingManualRecovery && (row.status === "queued" || row.status === "running")
+    ? "queued"
+    : row.status) as TaskStatus;
   const checkpointType = row.checkpointType as NovelWorkflowCheckpoint | null;
   const autoExecution = parseAutoExecutionState(row.seedPayloadJson);
   const isRecoveryInProgress = isAutoDirectorRecoveryInProgress({
@@ -241,6 +313,7 @@ function mapSummary(row: {
   }
   const explainability = buildWorkflowExplainability({
     status,
+    pendingManualRecovery,
     currentStage: row.currentStage,
     currentItemKey: row.currentItemKey,
     checkpointType,
@@ -263,12 +336,15 @@ function mapSummary(row: {
     : null;
   const recoveryHint = isSkippableReviewBlockedFailure
     ? buildSkippableAutoExecutionReviewRecoveryHint(autoExecution)
-    : buildTaskRecoveryHint("novel_workflow", status);
+    : pendingManualRecovery
+      ? (row.lastError?.trim() || "服务重启后任务已暂停，等待手动恢复。")
+      : buildTaskRecoveryHint("novel_workflow", status);
   return {
     id: row.id,
     kind: "novel_workflow",
     title: row.title,
     status,
+    pendingManualRecovery,
     progress: row.progress,
     currentStage: row.currentStage,
     currentItemKey: row.currentItemKey,
@@ -290,7 +366,12 @@ function mapSummary(row: {
     checkpointType,
     checkpointSummary,
     resumeTarget,
-    nextActionLabel: buildNovelWorkflowNextActionLabel(status, checkpointType, autoExecution?.scopeLabel ?? null),
+    nextActionLabel: buildNovelWorkflowNextActionLabel(
+      status,
+      checkpointType,
+      autoExecution?.scopeLabel ?? null,
+      pendingManualRecovery,
+    ),
     noticeCode: taskNotice?.code ?? null,
     noticeSummary: taskNotice?.summary ?? null,
     failureCode: status === "failed" && !isSkippableReviewBlockedFailure ? "NOVEL_WORKFLOW_FAILED" : null,
@@ -322,7 +403,11 @@ function mapSummary(row: {
 
 export class NovelWorkflowTaskAdapter {
   private readonly workflowService = new NovelWorkflowService();
-  private readonly novelDirectorService = new NovelDirectorService();
+  private readonly directorCommandService = new DirectorCommandService(this.workflowService);
+  readonly novelDirectorService = {
+    continueTask: (taskId: string, input?: Parameters<DirectorCommandService["enqueueContinueCommand"]>[1]) =>
+      this.directorCommandService.enqueueContinueCommand(taskId, input).then(() => undefined),
+  };
 
   async list(input: {
     status?: TaskStatus;
@@ -413,11 +498,19 @@ export class NovelWorkflowTaskAdapter {
     return visibleRows.map((row) => mapSummary(row));
   }
 
-  async detail(id: string): Promise<UnifiedTaskDetail | null> {
+  async detail(
+    id: string,
+    options: {
+      heal?: boolean;
+      seedPayloadMode?: "full" | "compact" | "none";
+    } = {},
+  ): Promise<UnifiedTaskDetail | null> {
     if (await isTaskArchived("novel_workflow", id)) {
       return null;
     }
-    await this.workflowService.healAutoDirectorTaskState(id);
+    if (options.heal !== false) {
+      await this.workflowService.healAutoDirectorTaskState(id);
+    }
 
     const row = await prisma.novelWorkflowTask.findUnique({
       where: { id },
@@ -456,6 +549,15 @@ export class NovelWorkflowTaskAdapter {
     const directorSession = workflowSeedPayload && typeof workflowSeedPayload.directorSession === "object"
       ? workflowSeedPayload.directorSession
       : null;
+    const seedPayloadMode = options.seedPayloadMode ?? "full";
+    const responseSeedPayload = seedPayloadMode === "full"
+      ? seedPayload
+      : seedPayloadMode === "compact"
+        ? compactSeedPayload(seedPayload)
+        : null;
+    const responseDirectorSession = seedPayloadMode === "full"
+      ? directorSession
+      : compactDirectorSession(directorSession);
     const boundLlm = getDirectorLlmOptionsFromSeedPayload(workflowSeedPayload);
 
     return {
@@ -470,7 +572,7 @@ export class NovelWorkflowTaskAdapter {
         checkpointType: row.checkpointType,
         checkpointSummary: row.checkpointSummary,
         resumeTarget,
-        directorSession,
+        directorSession: responseDirectorSession,
         llm: boundLlm
           ? {
             provider: boundLlm.provider ?? null,
@@ -479,7 +581,7 @@ export class NovelWorkflowTaskAdapter {
           }
           : null,
         taskNotice: parseTaskNotice(row.seedPayloadJson),
-        seedPayload,
+        seedPayload: responseSeedPayload,
         milestones,
         cancelRequestedAt: row.cancelRequestedAt?.toISOString() ?? null,
       },
@@ -487,6 +589,7 @@ export class NovelWorkflowTaskAdapter {
         lane: row.lane,
         novelId: row.novelId,
         status: summary.status,
+        pendingManualRecovery: summary.pendingManualRecovery,
         currentItemKey: row.currentItemKey,
         checkpointType: row.checkpointType as NovelWorkflowCheckpoint | null,
         directorSessionPhase: directorSession && typeof directorSession === "object"
@@ -503,8 +606,9 @@ export class NovelWorkflowTaskAdapter {
     id: string;
     llmOverride?: Pick<DirectorLLMOptions, "provider" | "model" | "temperature">;
     resume?: boolean;
+    batchAlreadyStartedCount?: number;
   }): Promise<UnifiedTaskDetail> {
-    const { id, llmOverride, resume } = input;
+    const { id, llmOverride, resume, batchAlreadyStartedCount } = input;
     if (await isTaskArchived("novel_workflow", id)) {
       throw new AppError("Task not found.", 404);
     }
@@ -512,12 +616,19 @@ export class NovelWorkflowTaskAdapter {
     if (!row) {
       throw new AppError("Task not found.", 404);
     }
+    const shouldResumeAutoDirector = row.lane === "auto_director" && (
+      resume === true
+      || (resume !== false && (row.status === "failed" || row.status === "cancelled"))
+    );
     if (row.lane === "auto_director" && llmOverride) {
       await this.workflowService.applyAutoDirectorLlmOverride(id, llmOverride);
     }
     await this.workflowService.retryTask(id);
-    if (row.lane === "auto_director" && resume) {
-      await this.novelDirectorService.continueTask(id);
+    if (shouldResumeAutoDirector) {
+      await this.novelDirectorService.continueTask(id, {
+        batchAlreadyStartedCount,
+        forceResume: true,
+      });
     }
     const detail = await this.detail(id);
     if (!detail) {
@@ -530,7 +641,15 @@ export class NovelWorkflowTaskAdapter {
     if (await isTaskArchived("novel_workflow", id)) {
       throw new AppError("Task not found.", 404);
     }
-    await this.workflowService.cancelTask(id);
+    const row = await this.workflowService.getTaskById(id);
+    if (!row) {
+      throw new AppError("Task not found.", 404);
+    }
+    if (row.lane === "auto_director") {
+      await this.directorCommandService.enqueueCancelCommand(id);
+    } else {
+      await this.workflowService.cancelTask(id);
+    }
     const detail = await this.detail(id);
     if (!detail) {
       throw new AppError("Task not found after cancellation.", 404);

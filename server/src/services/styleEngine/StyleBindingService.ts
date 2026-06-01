@@ -1,14 +1,15 @@
 import type { ResolvedStyleContext, StyleBinding, StyleProfile, StyleRuleSet } from "@ai-novel/shared/types/styleEngine";
 import { prisma } from "../../db/prisma";
+import { AntiAiPolicyResolver } from "./AntiAiPolicyResolver";
 import { StyleCompiler } from "./StyleCompiler";
 import { ensureStyleEngineSeedData } from "./StyleEngineSeedService";
 import {
   buildEmptyRuleSet,
   clamp,
-  mapAntiAiRuleRow,
   mapStyleProfileRow,
   mergeRuleObjects,
 } from "./helpers";
+import { sanitizeStyleContextForGeneration } from "./styleGenerationSanitizer";
 
 const TARGET_PRIORITY: Record<StyleBinding["targetType"], number> = {
   novel: 1,
@@ -42,8 +43,19 @@ function assignRuleWeights(
   }
 }
 
+function sortMatchedBindings(bindings: StyleBinding[]): StyleBinding[] {
+  return bindings.slice().sort((left, right) => {
+    const targetDiff = TARGET_PRIORITY[right.targetType] - TARGET_PRIORITY[left.targetType];
+    if (targetDiff !== 0) {
+      return targetDiff;
+    }
+    return right.priority - left.priority;
+  });
+}
+
 export class StyleBindingService {
   private readonly compiler = new StyleCompiler();
+  private readonly antiAiPolicyResolver = new AntiAiPolicyResolver();
 
   async listBindings(filter?: Partial<Pick<StyleBinding, "targetType" | "targetId" | "styleProfileId">>): Promise<StyleBinding[]> {
     await ensureStyleEngineSeedData();
@@ -179,20 +191,64 @@ export class StyleBindingService {
       }
     }
 
-    if (matchedBindings.length === 0) {
-      return {
-        matchedBindings: [],
-        compiledBlocks: null,
-      };
-    }
-
-    const ordered = [...matchedBindings].sort((left, right) => {
+    const ordered = matchedBindings.slice().sort((left, right) => {
       const targetPriorityDiff = TARGET_PRIORITY[left.targetType] - TARGET_PRIORITY[right.targetType];
       if (targetPriorityDiff !== 0) {
         return targetPriorityDiff;
       }
       return left.priority - right.priority;
     });
+    const effectiveBinding = sortMatchedBindings(matchedBindings)[0] ?? null;
+    const sourceTargets = Array.from(new Set(ordered.map((binding) => binding.targetType)));
+    const sourceLabels = sourceTargets.map((targetType) => targetType.toUpperCase());
+    const antiAiPolicy = await this.antiAiPolicyResolver.resolveFromBindings({
+      matchedBindings,
+      effectiveStyleProfileId: effectiveBinding?.styleProfileId ?? null,
+    });
+    const baselineRules = antiAiPolicy.globalBaselineRules.map((item) => item.rule);
+
+    if (matchedBindings.length === 0) {
+      if (baselineRules.length === 0) {
+        return sanitizeStyleContextForGeneration({
+          matchedBindings: [],
+          compiledBlocks: null,
+          effectiveStyleProfileId: null,
+          taskStyleProfileId: input.taskStyleProfileId?.trim() || null,
+          activeSourceTargets: [],
+          activeSourceLabels: [],
+          maturity: "summary_only",
+          usesGlobalAntiAiBaseline: false,
+          globalAntiAiRuleIds: [],
+          styleAntiAiRuleIds: [],
+        });
+      }
+
+      const compiledBlocks = this.compiler.compile({
+        styleProfile: buildEmptyRuleSet(),
+        antiAiRules: baselineRules,
+        weight: 1,
+        appliedRuleIds: baselineRules.map((rule) => rule.id),
+        taskStyleProfileId: input.taskStyleProfileId?.trim() || null,
+        activeSourceTargets: [],
+        activeSourceLabels: ["GLOBAL_BASELINE"],
+        usesGlobalAntiAiBaseline: true,
+        globalAntiAiRuleIds: baselineRules.map((rule) => rule.id),
+        styleAntiAiRuleIds: [],
+      });
+
+      return sanitizeStyleContextForGeneration({
+        matchedBindings: [],
+        compiledBlocks,
+        effectiveStyleProfileId: null,
+        taskStyleProfileId: input.taskStyleProfileId?.trim() || null,
+        activeSourceTargets: [],
+        activeSourceLabels: ["GLOBAL_BASELINE"],
+        maturity: compiledBlocks.contract.meta.maturity,
+        usesGlobalAntiAiBaseline: true,
+        globalAntiAiRuleIds: baselineRules.map((rule) => rule.id),
+        styleAntiAiRuleIds: [],
+      });
+    }
 
     const mergedRules = ordered.reduce<StyleRuleSet>((acc, binding) => {
       const profile = binding.styleProfile as StyleProfile | undefined;
@@ -219,15 +275,17 @@ export class StyleBindingService {
       return acc;
     }, buildEmptyRuleWeightMap());
 
-    const antiRulesById = new Map<string, { rule: ReturnType<typeof mapAntiAiRuleRow>; weight: number }>();
-    for (const binding of ordered) {
-      for (const rule of binding.styleProfile?.antiAiRules ?? []) {
-        const existing = antiRulesById.get(rule.id);
-        if (!existing || binding.weight >= existing.weight) {
-          antiRulesById.set(rule.id, { rule, weight: binding.weight });
-        }
+    const styleSpecificRules = antiAiPolicy.styleSpecificRules.map((item) => item.rule);
+    const styleSpecificWeights = new Map(antiAiPolicy.styleSpecificRules.map((item) => [item.rule.id, item.weight]));
+    const combinedAntiAiRules = antiAiPolicy.effectiveRules.map((item) => item.rule);
+    const combinedRuleWeights = combinedAntiAiRules.reduce<Record<string, number>>((acc, rule) => {
+      if (styleSpecificWeights.has(rule.id)) {
+        acc[rule.id] = styleSpecificWeights.get(rule.id)!;
+      } else {
+        acc[rule.id] = 1;
       }
-    }
+      return acc;
+    }, {});
 
     const totalSpecificity = ordered.reduce((sum, item) => sum + TARGET_PRIORITY[item.targetType], 0);
     const weightedStrength = ordered.reduce(
@@ -242,9 +300,9 @@ export class StyleBindingService {
 
     const compiledBlocks = this.compiler.compile({
       styleProfile: mergedRules,
-      antiAiRules: Array.from(antiRulesById.values()).map((item) => item.rule),
+      antiAiRules: combinedAntiAiRules,
       weight: mergedWeight,
-      appliedRuleIds: Array.from(antiRulesById.keys()),
+      appliedRuleIds: combinedAntiAiRules.map((rule) => rule.id),
       bindingSummaries: ordered.map((binding) => ({
         styleProfileId: binding.styleProfileId,
         styleProfileName: binding.styleProfile?.name ?? null,
@@ -253,21 +311,27 @@ export class StyleBindingService {
         weight: binding.weight,
       })),
       sectionWeights,
-      antiAiRuleWeights: Array.from(antiRulesById.entries()).reduce<Record<string, number>>((acc, [ruleId, item]) => {
-        acc[ruleId] = item.weight;
-        return acc;
-      }, {}),
+      antiAiRuleWeights: combinedRuleWeights,
+      effectiveStyleProfileId: effectiveBinding?.styleProfileId ?? null,
+      taskStyleProfileId: input.taskStyleProfileId?.trim() || null,
+      activeSourceTargets: sourceTargets,
+      activeSourceLabels: sourceLabels,
+      usesGlobalAntiAiBaseline: baselineRules.length > 0,
+      globalAntiAiRuleIds: baselineRules.map((rule) => rule.id),
+      styleAntiAiRuleIds: styleSpecificRules.map((rule) => rule.id),
     });
 
-    return {
-      matchedBindings: matchedBindings.sort((left, right) => {
-        const targetDiff = TARGET_PRIORITY[right.targetType] - TARGET_PRIORITY[left.targetType];
-        if (targetDiff !== 0) {
-          return targetDiff;
-        }
-        return right.priority - left.priority;
-      }),
+    return sanitizeStyleContextForGeneration({
+      matchedBindings: sortMatchedBindings(matchedBindings),
       compiledBlocks,
-    };
+      effectiveStyleProfileId: effectiveBinding?.styleProfileId ?? null,
+      taskStyleProfileId: input.taskStyleProfileId?.trim() || null,
+      activeSourceTargets: sourceTargets,
+      activeSourceLabels: sourceLabels,
+      maturity: compiledBlocks.contract.meta.maturity,
+      usesGlobalAntiAiBaseline: baselineRules.length > 0,
+      globalAntiAiRuleIds: baselineRules.map((rule) => rule.id),
+      styleAntiAiRuleIds: styleSpecificRules.map((rule) => rule.id),
+    });
   }
 }

@@ -1,6 +1,20 @@
-import type { LLMProvider } from "@ai-novel/shared/types/llm";
+import {
+  LLM_PROVIDERS,
+  isBuiltinLLMProvider,
+  type LLMProvider,
+} from "@ai-novel/shared/types/llm";
 
-export type EmbeddingProvider = "openai" | "siliconflow";
+export type EmbeddingProvider = LLMProvider;
+
+const DEFAULT_EMBEDDING_PROVIDER: EmbeddingProvider = "openai";
+
+function normalizeOptionalText(value: string | undefined): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed || undefined;
+}
 
 function isEnabled(rawValue: string | undefined, defaultValue: boolean): boolean {
   if (!rawValue) {
@@ -20,11 +34,35 @@ function asInt(rawValue: string | undefined, fallback: number, min: number, max:
 }
 
 export function asEmbeddingProvider(rawValue: string | undefined): EmbeddingProvider {
-  const normalized = (rawValue ?? "").trim().toLowerCase();
-  if (normalized === "siliconflow") {
+  const trimmed = rawValue?.trim();
+  if (!trimmed) {
+    return DEFAULT_EMBEDDING_PROVIDER;
+  }
+
+  const normalizedBuiltin = trimmed.toLowerCase();
+  if (isBuiltinLLMProvider(normalizedBuiltin)) {
+    return normalizedBuiltin;
+  }
+
+  return trimmed;
+}
+
+function resolveEmbeddingProviderFromEnv(): EmbeddingProvider {
+  if (normalizeOptionalText(process.env.EMBEDDING_PROVIDER)) {
+    return asEmbeddingProvider(process.env.EMBEDDING_PROVIDER);
+  }
+  if (normalizeOptionalText(process.env.SILICONFLOW_EMBEDDING_MODEL)) {
     return "siliconflow";
   }
   return "openai";
+}
+
+function resolveEmbeddingModelFromEnv(provider: EmbeddingProvider): string {
+  return normalizeOptionalText(process.env.EMBEDDING_MODEL)
+    ?? (provider === "siliconflow"
+      ? normalizeOptionalText(process.env.SILICONFLOW_EMBEDDING_MODEL)
+      : normalizeOptionalText(process.env.OPENAI_EMBEDDING_MODEL))
+    ?? "text-embedding-3-small";
 }
 
 export interface RagContextScope {
@@ -34,12 +72,14 @@ export interface RagContextScope {
   ownerTypes?: string[];
 }
 
+const embeddingProvider = resolveEmbeddingProviderFromEnv();
+
 export const ragConfig = {
   enabled: isEnabled(process.env.RAG_ENABLED, true),
   verboseLog: isEnabled(process.env.RAG_VERBOSE_LOG, false),
   defaultTenantId: process.env.RAG_DEFAULT_TENANT ?? "default",
-  embeddingProvider: asEmbeddingProvider(process.env.EMBEDDING_PROVIDER),
-  embeddingModel: process.env.EMBEDDING_MODEL ?? "text-embedding-3-small",
+  embeddingProvider,
+  embeddingModel: resolveEmbeddingModelFromEnv(embeddingProvider),
   embeddingVersion: asInt(process.env.EMBEDDING_VERSION, 1, 1, 100),
   embeddingBatchSize: asInt(process.env.EMBEDDING_BATCH_SIZE, 64, 1, 256),
   embeddingTimeoutMs: asInt(process.env.RAG_EMBEDDING_TIMEOUT_MS ?? process.env.RAG_HTTP_TIMEOUT_MS, 30000, 5000, 300000),
@@ -59,5 +99,5 @@ export const ragConfig = {
   workerMaxAttempts: asInt(process.env.RAG_WORKER_MAX_ATTEMPTS, 5, 1, 20),
   workerRetryBaseMs: asInt(process.env.RAG_WORKER_RETRY_BASE_MS, 5000, 1000, 300000),
   httpTimeoutMs: asInt(process.env.RAG_HTTP_TIMEOUT_MS, 30000, 1000, 300000),
-  providerPriority: ["openai", "siliconflow"] as Array<Extract<LLMProvider, "openai" | "siliconflow">>,
+  providerPriority: [...LLM_PROVIDERS] as EmbeddingProvider[],
 };

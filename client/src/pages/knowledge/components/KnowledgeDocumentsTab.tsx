@@ -3,6 +3,7 @@ import type { KnowledgeDocumentStatus, KnowledgeDocumentSummary } from "@ai-nove
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import OpenInCreativeHubButton from "@/components/creativeHub/OpenInCreativeHubButton";
+import SelectField from "@/components/common/SelectField";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import type { RagJobSummary } from "@/api/knowledge";
@@ -44,10 +45,29 @@ export default function KnowledgeDocumentsTab({
   onReindexDocument,
   onUpdateStatus,
 }: KnowledgeDocumentsTabProps) {
+  const statusOptions = [
+    { value: "", label: "全部未归档" },
+    { value: "enabled", label: "仅启用" },
+    { value: "disabled", label: "仅停用" },
+    { value: "archived", label: "仅归档" },
+  ] as const;
+
+  const confirmArchiveDocument = (document: KnowledgeDocumentSummary) => {
+    const confirmed = window.confirm(
+      `确认归档“${document.title}”吗？归档会移出默认检索和资料选择，原文与版本会保留，可在“仅归档”中恢复启用。`,
+    );
+    if (!confirmed) {
+      return;
+    }
+    onUpdateStatus(document.id, "archived");
+  };
+
   const renderDocumentRow = (document: KnowledgeDocumentSummary) => {
     const documentJob = latestKnowledgeDocumentJobs.get(document.id);
     const displayIndexStatus = documentJob && (documentJob.status === "queued" || documentJob.status === "running")
       ? documentJob.status
+      : document.status === "archived"
+        ? "idle"
       : document.latestIndexStatus;
 
     return (
@@ -90,42 +110,52 @@ export default function KnowledgeDocumentsTab({
           <Button size="sm" variant="secondary" onClick={() => onSelectDocument(document.id)}>
             查看版本
           </Button>
-          <OpenInCreativeHubButton
-            bindings={{ knowledgeDocumentIds: [document.id] }}
-            label="在创作中枢中继续"
-          />
-          <Button asChild size="sm" variant="outline">
-            <Link to={`/book-analysis?documentId=${document.id}`}>新建拆书</Link>
-          </Button>
-          <Button size="sm" variant="outline" onClick={() => onReindexDocument(document.id)}>
-            重建索引
-          </Button>
-          {document.status === "enabled" ? (
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => onUpdateStatus(document.id, "disabled")}
-            >
-              停用
-            </Button>
-          ) : document.status === "disabled" ? (
+          {document.status === "archived" ? (
             <Button
               size="sm"
               variant="outline"
               onClick={() => onUpdateStatus(document.id, "enabled")}
             >
-              启用
+              恢复启用
             </Button>
-          ) : null}
-          {document.status !== "archived" ? (
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => onUpdateStatus(document.id, "archived")}
-            >
-              归档
-            </Button>
-          ) : null}
+          ) : (
+            <>
+              <OpenInCreativeHubButton
+                bindings={{ knowledgeDocumentIds: [document.id] }}
+                label="在创作中枢中继续"
+              />
+              <Button asChild size="sm" variant="outline">
+                <Link to={`/book-analysis?documentId=${document.id}`}>新建拆书</Link>
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => onReindexDocument(document.id)}>
+                重建索引
+              </Button>
+              {document.status === "enabled" ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => onUpdateStatus(document.id, "disabled")}
+                >
+                  停用
+                </Button>
+              ) : document.status === "disabled" ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => onUpdateStatus(document.id, "enabled")}
+                >
+                  启用
+                </Button>
+              ) : null}
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => confirmArchiveDocument(document)}
+              >
+                归档
+              </Button>
+            </>
+          )}
         </div>
       </div>
     );
@@ -174,16 +204,14 @@ export default function KnowledgeDocumentsTab({
               onChange={(event) => onKeywordChange(event.target.value)}
               placeholder="按标题或文件名搜索"
             />
-            <select
-              className="w-full rounded-md border bg-background p-2 text-sm"
+            <SelectField
               value={status}
-              onChange={(event) => onStatusChange(event.target.value as KnowledgeDocumentStatus | "")}
-            >
-              <option value="">全部未归档</option>
-              <option value="enabled">仅启用</option>
-              <option value="disabled">仅停用</option>
-              <option value="archived">仅归档</option>
-            </select>
+              onValueChange={(value) => onStatusChange(value as KnowledgeDocumentStatus | "")}
+              options={statusOptions.map((option) => ({ ...option }))}
+              placeholder="筛选状态"
+              className="space-y-0"
+              triggerClassName="h-10"
+            />
           </div>
           <div className="space-y-3">
             {documents.map(renderDocumentRow)}

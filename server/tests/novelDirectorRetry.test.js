@@ -4,14 +4,18 @@ require("../dist/app.js");
 const {
   applyDirectorLlmOverride,
   getDirectorLlmOptionsFromSeedPayload,
-} = require("../dist/services/novel/director/novelDirectorHelpers.js");
+} = require("../dist/services/novel/director/runtime/novelDirectorHelpers.js");
 const { NovelDirectorService } = require("../dist/services/novel/director/NovelDirectorService.js");
 const {
   runDirectorStructuredOutlinePhase,
-} = require("../dist/services/novel/director/novelDirectorPipelinePhases.js");
+} = require("../dist/services/novel/director/phases/novelDirectorPipelinePhases.js");
+const {
+  runDirectorTrackedStep,
+} = require("../dist/services/novel/director/projections/directorProgressTracker.js");
 const {
   buildVolumeWorkspaceDocument,
 } = require("../dist/services/novel/volume/volumeWorkspaceDocument.js");
+const { prisma } = require("../dist/db/prisma.js");
 
 function buildDirectorInput(overrides = {}) {
   return {
@@ -49,6 +53,23 @@ function buildDirectorInput(overrides = {}) {
   };
 }
 
+function stubDirectorRuntimeNode(service, onRunNode) {
+  const originalRunNode = service.directorRuntime.runNode;
+  service.directorRuntime.runNode = async (contract, input, collectArtifacts) => {
+    onRunNode?.(contract, input);
+    const output = await contract.run();
+    return {
+      status: "completed",
+      output,
+      runtimeSnapshot: null,
+      producedArtifacts: collectArtifacts ? await collectArtifacts(output) : output?.artifacts ?? [],
+    };
+  };
+  return () => {
+    service.directorRuntime.runNode = originalRunNode;
+  };
+}
+
 function createVolumeChapter(input) {
   return {
     id: input.id,
@@ -58,6 +79,9 @@ function createVolumeChapter(input) {
     title: input.title ?? `第${input.chapterOrder}章`,
     summary: input.summary ?? `第${input.chapterOrder}章摘要`,
     purpose: input.purpose ?? null,
+    exclusiveEvent: input.exclusiveEvent ?? null,
+    endingState: input.endingState ?? null,
+    nextChapterEntryState: input.nextChapterEntryState ?? null,
     conflictLevel: input.conflictLevel ?? null,
     revealLevel: input.revealLevel ?? null,
     targetWordCount: input.targetWordCount ?? null,
@@ -68,6 +92,53 @@ function createVolumeChapter(input) {
     createdAt: new Date(0).toISOString(),
     updatedAt: new Date(0).toISOString(),
   };
+}
+
+function createSceneCards(chapter) {
+  return JSON.stringify({
+    targetWordCount: chapter.targetWordCount ?? 2600,
+    lengthBudget: {
+      targetWordCount: chapter.targetWordCount ?? 2600,
+      softMinWordCount: 2200,
+      softMaxWordCount: 3000,
+      hardMaxWordCount: 3400,
+    },
+    scenes: [
+      {
+        key: `${chapter.id}-scene-1`,
+        title: "起势",
+        purpose: "推进目标",
+        mustAdvance: ["主线"],
+        mustPreserve: ["人物动机"],
+        entryState: "进入冲突",
+        exitState: "压力升级",
+        forbiddenExpansion: [],
+        targetWordCount: 800,
+      },
+      {
+        key: `${chapter.id}-scene-2`,
+        title: "交锋",
+        purpose: "制造压力",
+        mustAdvance: ["冲突"],
+        mustPreserve: ["设定边界"],
+        entryState: "压力升级",
+        exitState: "代价显形",
+        forbiddenExpansion: [],
+        targetWordCount: 900,
+      },
+      {
+        key: `${chapter.id}-scene-3`,
+        title: "落点",
+        purpose: "形成钩子",
+        mustAdvance: ["章末推进"],
+        mustPreserve: ["后续入口"],
+        entryState: "代价显形",
+        exitState: "进入下一章",
+        forbiddenExpansion: [],
+        targetWordCount: 900,
+      },
+    ],
+  });
 }
 
 function createStructuredOutlineWorkspace() {
@@ -106,6 +177,10 @@ function createStructuredOutlineWorkspace() {
             targetWordCount: 2400,
             mustAvoid: "避免跑题",
             taskSheet: "执行任务单",
+            sceneCards: createSceneCards({
+              id: "volume-1-chapter-1",
+              targetWordCount: 2400,
+            }),
           }),
         ],
         createdAt: new Date(0).toISOString(),
@@ -251,30 +326,11 @@ test("generateCandidates marks workflow task failed when candidate-stage generat
 test("continueTask resumes queued candidate-stage tasks before novel creation", async () => {
   const service = new NovelDirectorService();
   const originalGetTaskById = service.workflowService.getTaskById;
-  const originalGetTaskByIdWithoutHealing = service.workflowService.getTaskByIdWithoutHealing;
   const originalScheduleBackgroundRun = service.scheduleBackgroundRun;
   const originalGenerate = service.candidateStageService.generateCandidates;
   const resumed = [];
 
   service.workflowService.getTaskById = async () => ({
-    id: "task_candidate_resume",
-    lane: "auto_director",
-    status: "running",
-    novelId: null,
-    checkpointType: null,
-    currentItemKey: "candidate_direction_batch",
-    seedPayloadJson: JSON.stringify({
-      idea: "A courier discovers a hidden rule-bound city underworld.",
-      provider: "custom_coding_plan",
-      model: "kimi-k2.5",
-      temperature: 0.8,
-      runMode: "auto_to_ready",
-      candidateStage: {
-        mode: "generate",
-      },
-    }),
-  });
-  service.workflowService.getTaskByIdWithoutHealing = async () => ({
     id: "task_candidate_resume",
     lane: "auto_director",
     status: "queued",
@@ -310,7 +366,6 @@ test("continueTask resumes queued candidate-stage tasks before novel creation", 
     assert.equal(resumed[0].temperature, 0.8);
   } finally {
     service.workflowService.getTaskById = originalGetTaskById;
-    service.workflowService.getTaskByIdWithoutHealing = originalGetTaskByIdWithoutHealing;
     service.scheduleBackgroundRun = originalScheduleBackgroundRun;
     service.candidateStageService.generateCandidates = originalGenerate;
   }
@@ -318,7 +373,9 @@ test("continueTask resumes queued candidate-stage tasks before novel creation", 
 
 test("continueTask ignores stale candidate-stage state after the workflow has entered story macro", async () => {
   const service = new NovelDirectorService();
-  const originalGetTaskByIdWithoutHealing = service.workflowService.getTaskByIdWithoutHealing;
+  const originalGetTaskById = service.workflowService.getTaskById;
+  const originalResolveAssetFirstRecovery = service.resolveAssetFirstRecovery;
+  const originalGetVolumes = service.volumeService.getVolumes;
   const originalBootstrapTask = service.workflowService.bootstrapTask;
   const originalMarkTaskRunning = service.workflowService.markTaskRunning;
   const originalScheduleBackgroundRun = service.scheduleBackgroundRun;
@@ -330,7 +387,7 @@ test("continueTask ignores stale candidate-stage state after the workflow has en
   const pipelineRuns = [];
   let candidateResumeCount = 0;
 
-  service.workflowService.getTaskByIdWithoutHealing = async () => ({
+  service.workflowService.getTaskById = async () => ({
     id: "task_story_macro_resume",
     lane: "auto_director",
     status: "queued",
@@ -358,6 +415,8 @@ test("continueTask ignores stale candidate-stage state after the workflow has en
       },
     }),
   });
+  service.resolveAssetFirstRecovery = async () => null;
+  service.volumeService.getVolumes = async () => null;
   service.workflowService.bootstrapTask = async (input) => {
     bootstrapCalls.push(input);
     return {
@@ -393,8 +452,11 @@ test("continueTask ignores stale candidate-stage state after the workflow has en
     assert.equal(scheduledRuns.length, 1);
     assert.equal(pipelineRuns.length, 1);
     assert.equal(pipelineRuns[0].startPhase, "story_macro");
+    assert.equal(pipelineRuns[0].scope, "book");
   } finally {
-    service.workflowService.getTaskByIdWithoutHealing = originalGetTaskByIdWithoutHealing;
+    service.workflowService.getTaskById = originalGetTaskById;
+    service.resolveAssetFirstRecovery = originalResolveAssetFirstRecovery;
+    service.volumeService.getVolumes = originalGetVolumes;
     service.workflowService.bootstrapTask = originalBootstrapTask;
     service.workflowService.markTaskRunning = originalMarkTaskRunning;
     service.scheduleBackgroundRun = originalScheduleBackgroundRun;
@@ -403,10 +465,39 @@ test("continueTask ignores stale candidate-stage state after the workflow has en
   }
 });
 
+test("resolveAssetFirstRecovery uses the runtime default resolver without recursive callback", async () => {
+  const service = new NovelDirectorService();
+  const originalResolveFromAssets = service.continueRuntime.resolveAssetFirstRecoveryFromAvailableAssets;
+  const calls = [];
+
+  service.continueRuntime.resolveAssetFirstRecoveryFromAvailableAssets = async (input) => {
+    calls.push(input);
+    return null;
+  };
+
+  try {
+    const result = await service.resolveAssetFirstRecovery({
+      novelId: "novel_no_recursion",
+      directorInput: buildDirectorInput({
+        workflowTaskId: "task_no_recursion",
+      }),
+    });
+
+    assert.equal(result, null);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].novelId, "novel_no_recursion");
+  } finally {
+    service.continueRuntime.resolveAssetFirstRecoveryFromAvailableAssets = originalResolveFromAssets;
+  }
+});
+
 test("continueTask resumes auto-director tasks that are still marked running after manual-recovery pause", async () => {
   const service = new NovelDirectorService();
   const originalContinueCandidateStageTask = service.continueCandidateStageTask;
-  const originalGetTaskByIdWithoutHealing = service.workflowService.getTaskByIdWithoutHealing;
+  const originalGetTaskById = service.workflowService.getTaskById;
+  const originalResolveAssetFirstRecovery = service.resolveAssetFirstRecovery;
+  const originalAssertHighMemoryDirectorStartAllowed = service.assertHighMemoryDirectorStartAllowed;
+  const originalGetVolumes = service.volumeService.getVolumes;
   const originalBootstrapTask = service.workflowService.bootstrapTask;
   const originalMarkTaskRunning = service.workflowService.markTaskRunning;
   const originalScheduleBackgroundRun = service.scheduleBackgroundRun;
@@ -417,7 +508,10 @@ test("continueTask resumes auto-director tasks that are still marked running aft
   const pipelineRuns = [];
 
   service.continueCandidateStageTask = async () => false;
-  service.workflowService.getTaskByIdWithoutHealing = async () => ({
+  service.resolveAssetFirstRecovery = async () => null;
+  service.assertHighMemoryDirectorStartAllowed = async () => undefined;
+  service.volumeService.getVolumes = async () => null;
+  service.workflowService.getTaskById = async () => ({
     id: "task_recovery_resume",
     lane: "auto_director",
     status: "running",
@@ -425,6 +519,10 @@ test("continueTask resumes auto-director tasks that are still marked running aft
     novelId: "novel_recovery_resume",
     checkpointType: null,
     currentItemKey: "chapter_detail_bundle",
+    resumeTargetJson: JSON.stringify({
+      stage: "structured",
+      volumeId: "volume_1",
+    }),
     seedPayloadJson: JSON.stringify({
       directorInput: buildDirectorInput({
         workflowTaskId: "task_recovery_resume",
@@ -458,14 +556,20 @@ test("continueTask resumes auto-director tasks that are still marked running aft
     await service.continueTask("task_recovery_resume");
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.equal(bootstrapCalls.length, 1);
+    assert.equal(bootstrapCalls[0].seedPayload.resumeTarget.volumeId, "volume_1");
     assert.equal(runningCalls.length, 1);
     assert.equal(runningCalls[0].stage, "structured_outline");
+    assert.equal(runningCalls[0].volumeId, "volume_1");
     assert.equal(scheduledRuns.length, 1);
     assert.equal(pipelineRuns.length, 1);
     assert.equal(pipelineRuns[0].startPhase, "structured_outline");
+    assert.equal(pipelineRuns[0].scope, "volume:volume_1");
   } finally {
     service.continueCandidateStageTask = originalContinueCandidateStageTask;
-    service.workflowService.getTaskByIdWithoutHealing = originalGetTaskByIdWithoutHealing;
+    service.workflowService.getTaskById = originalGetTaskById;
+    service.resolveAssetFirstRecovery = originalResolveAssetFirstRecovery;
+    service.assertHighMemoryDirectorStartAllowed = originalAssertHighMemoryDirectorStartAllowed;
+    service.volumeService.getVolumes = originalGetVolumes;
     service.workflowService.bootstrapTask = originalBootstrapTask;
     service.workflowService.markTaskRunning = originalMarkTaskRunning;
     service.scheduleBackgroundRun = originalScheduleBackgroundRun;
@@ -476,16 +580,22 @@ test("continueTask resumes auto-director tasks that are still marked running aft
 test("continueTask resumes auto execution in the background instead of blocking the request", async () => {
   const service = new NovelDirectorService();
   const originalContinueCandidateStageTask = service.continueCandidateStageTask;
-  const originalGetTaskByIdWithoutHealing = service.workflowService.getTaskByIdWithoutHealing;
+  const originalGetTaskById = service.workflowService.getTaskById;
+  const originalResolveAssetFirstRecovery = service.resolveAssetFirstRecovery;
   const originalMarkTaskRunning = service.workflowService.markTaskRunning;
   const originalScheduleBackgroundRun = service.scheduleBackgroundRun;
   const originalRunFromReady = service.autoExecutionRuntime.runFromReady;
   const runningCalls = [];
   const scheduledRuns = [];
   const runtimeCalls = [];
+  const restoreDirectorRunNode = stubDirectorRuntimeNode(service);
 
   service.continueCandidateStageTask = async () => false;
-  service.workflowService.getTaskByIdWithoutHealing = async () => ({
+  service.resolveAssetFirstRecovery = async () => ({
+    type: "auto_execution",
+    resumeCheckpointType: "chapter_batch_ready",
+  });
+  service.workflowService.getTaskById = async () => ({
     id: "task_auto_execution_resume",
     lane: "auto_director",
     status: "failed",
@@ -505,7 +615,7 @@ test("continueTask resumes auto execution in the background instead of blocking 
       }),
       directorSession: {
         runMode: "auto_to_execution",
-        phase: "front10_ready",
+        phase: "chapter_execution",
         isBackgroundRunning: false,
         lockedScopes: ["basic", "story_macro", "character", "outline", "structured", "chapter", "pipeline"],
         reviewScope: null,
@@ -559,14 +669,546 @@ test("continueTask resumes auto execution in the background instead of blocking 
     assert.equal(runtimeCalls[0].allowSkipReviewBlockedChapter, true);
   } finally {
     service.continueCandidateStageTask = originalContinueCandidateStageTask;
-    service.workflowService.getTaskByIdWithoutHealing = originalGetTaskByIdWithoutHealing;
+    service.workflowService.getTaskById = originalGetTaskById;
+    service.resolveAssetFirstRecovery = originalResolveAssetFirstRecovery;
     service.workflowService.markTaskRunning = originalMarkTaskRunning;
     service.scheduleBackgroundRun = originalScheduleBackgroundRun;
+    service.autoExecutionRuntime.runFromReady = originalRunFromReady;
+    restoreDirectorRunNode();
+  }
+});
+
+test("continueTask lets full_book_autopilot recover review-blocked chapter checkpoints", async () => {
+  const service = new NovelDirectorService();
+  const originalContinueCandidateStageTask = service.continueCandidateStageTask;
+  const originalGetTaskById = service.workflowService.getTaskById;
+  const originalResolveAssetFirstRecovery = service.resolveAssetFirstRecovery;
+  const originalMarkTaskRunning = service.workflowService.markTaskRunning;
+  const originalScheduleBackgroundRun = service.scheduleBackgroundRun;
+  const originalRunFromReady = service.autoExecutionRuntime.runFromReady;
+  const runningCalls = [];
+  const scheduledRuns = [];
+  const runtimeCalls = [];
+  const restoreDirectorRunNode = stubDirectorRuntimeNode(service);
+
+  service.continueCandidateStageTask = async () => false;
+  service.resolveAssetFirstRecovery = async () => ({
+    type: "auto_execution",
+    resumeCheckpointType: "chapter_batch_ready",
+  });
+  service.workflowService.getTaskById = async () => ({
+    id: "task_full_book_autopilot_resume",
+    lane: "auto_director",
+    status: "failed",
+    pendingManualRecovery: false,
+    novelId: "novel_full_book_autopilot_resume",
+    checkpointType: "chapter_batch_ready",
+    currentItemKey: "quality_repair",
+    resumeTargetJson: JSON.stringify({
+      stage: "pipeline",
+      chapterId: "chapter_6",
+    }),
+    lastError: "Chapter generation is blocked until review is resolved. 2 pending state proposal(s)",
+    seedPayloadJson: JSON.stringify({
+      directorInput: buildDirectorInput({
+        workflowTaskId: "task_full_book_autopilot_resume",
+        runMode: "full_book_autopilot",
+      }),
+      directorSession: {
+        runMode: "full_book_autopilot",
+        phase: "chapter_execution",
+        isBackgroundRunning: false,
+        lockedScopes: ["basic", "story_macro", "character", "outline", "structured", "chapter", "pipeline"],
+        reviewScope: null,
+      },
+      autoExecution: {
+        enabled: true,
+        mode: "book",
+        scopeLabel: "full book",
+        startOrder: 6,
+        endOrder: 30,
+        totalChapterCount: 25,
+        nextChapterId: "chapter_6",
+        nextChapterOrder: 6,
+        remainingChapterCount: 25,
+        remainingChapterIds: ["chapter_6"],
+        remainingChapterOrders: [6, 7, 8, 9, 10],
+        pipelineJobId: "pipeline_full_book_existing",
+        pipelineStatus: "failed",
+      },
+    }),
+  });
+  service.workflowService.markTaskRunning = async (taskId, input) => {
+    runningCalls.push({ taskId, ...input });
+    return null;
+  };
+  service.scheduleBackgroundRun = (taskId, runner) => {
+    scheduledRuns.push({ taskId, runner });
+  };
+  service.autoExecutionRuntime.runFromReady = async (input) => {
+    runtimeCalls.push(input);
+  };
+
+  try {
+    await service.continueTask("task_full_book_autopilot_resume", {
+      continuationMode: "resume",
+    });
+    assert.equal(runningCalls.length, 1);
+    assert.equal(runningCalls[0].stage, "chapter_execution");
+    assert.equal(scheduledRuns.length, 1);
+    assert.equal(runtimeCalls.length, 0);
+
+    await scheduledRuns[0].runner();
+
+    assert.equal(runtimeCalls.length, 1);
+    assert.equal(runtimeCalls[0].taskId, "task_full_book_autopilot_resume");
+    assert.equal(runtimeCalls[0].novelId, "novel_full_book_autopilot_resume");
+    assert.equal(runtimeCalls[0].resumeCheckpointType, "chapter_batch_ready");
+    assert.equal(runtimeCalls[0].allowSkipReviewBlockedChapter, true);
+    assert.equal(runtimeCalls[0].approveAutoExecutionScope, true);
+  } finally {
+    service.continueCandidateStageTask = originalContinueCandidateStageTask;
+    service.workflowService.getTaskById = originalGetTaskById;
+    service.resolveAssetFirstRecovery = originalResolveAssetFirstRecovery;
+    service.workflowService.markTaskRunning = originalMarkTaskRunning;
+    service.scheduleBackgroundRun = originalScheduleBackgroundRun;
+    service.autoExecutionRuntime.runFromReady = originalRunFromReady;
+    restoreDirectorRunNode();
+  }
+});
+
+test("continueTask upgrades an explicit auto-execution continuation to execution mode", async () => {
+  const service = new NovelDirectorService();
+  const originalContinueCandidateStageTask = service.continueCandidateStageTask;
+  const originalGetTaskById = service.workflowService.getTaskById;
+  const originalResolveAssetFirstRecovery = service.resolveAssetFirstRecovery;
+  const originalMarkTaskRunning = service.workflowService.markTaskRunning;
+  const originalScheduleBackgroundRun = service.scheduleBackgroundRun;
+  const originalRunFromReady = service.autoExecutionRuntime.runFromReady;
+  const originalGetSnapshot = service.directorRuntime.getSnapshot;
+  const recoveryInputs = [];
+  const runningCalls = [];
+  const scheduledRuns = [];
+  const runtimeCalls = [];
+  const runtimeNodeInputs = [];
+  const restoreDirectorRunNode = stubDirectorRuntimeNode(service, (contract, input) => {
+    runtimeNodeInputs.push({ nodeKey: contract.nodeKey, input });
+  });
+
+  service.continueCandidateStageTask = async () => false;
+  service.resolveAssetFirstRecovery = async (input) => {
+    recoveryInputs.push(input);
+    return {
+      type: "auto_execution",
+      resumeCheckpointType: "chapter_batch_ready",
+    };
+  };
+  service.workflowService.getTaskById = async () => ({
+    id: "task_chapter_range_execution_continue",
+    lane: "auto_director",
+    status: "waiting_approval",
+    pendingManualRecovery: false,
+    novelId: "novel_chapter_range_execution_continue",
+    checkpointType: "chapter_batch_ready",
+    currentItemKey: "chapter_batch_ready",
+    resumeTargetJson: JSON.stringify({
+      stage: "pipeline",
+      chapterId: "chapter_1",
+    }),
+    seedPayloadJson: JSON.stringify({
+      runMode: "auto_to_ready",
+      directorInput: buildDirectorInput({
+        workflowTaskId: "task_chapter_range_execution_continue",
+        runMode: "auto_to_ready",
+      }),
+      directorSession: {
+        runMode: "auto_to_ready",
+        phase: "chapter_execution",
+        isBackgroundRunning: false,
+        lockedScopes: ["basic", "story_macro", "character", "outline", "structured", "chapter", "pipeline"],
+        reviewScope: null,
+      },
+      autoExecution: {
+        enabled: true,
+        mode: "chapter_range",
+        scopeLabel: "front 10",
+        startOrder: 1,
+        endOrder: 10,
+        totalChapterCount: 10,
+        nextChapterId: "chapter_1",
+        nextChapterOrder: 1,
+        remainingChapterCount: 10,
+        remainingChapterIds: ["chapter_1"],
+        remainingChapterOrders: [1],
+        pipelineJobId: null,
+        pipelineStatus: null,
+      },
+    }),
+  });
+  service.workflowService.markTaskRunning = async (taskId, input) => {
+    runningCalls.push({ taskId, ...input });
+    return null;
+  };
+  service.scheduleBackgroundRun = (taskId, runner) => {
+    scheduledRuns.push({ taskId, runner });
+  };
+  service.directorRuntime.getSnapshot = async () => ({
+    policy: { mode: "run_until_gate" },
+    steps: [
+      {
+        status: "waiting_approval",
+        nodeKey: "chapter_execution_node",
+        targetType: "novel",
+        targetId: "novel_chapter_range_execution_continue",
+      },
+    ],
+    artifacts: [],
+  });
+  service.autoExecutionRuntime.runFromReady = async (input) => {
+    runtimeCalls.push(input);
+  };
+
+  try {
+    await service.continueTask("task_chapter_range_execution_continue", {
+      continuationMode: "auto_execute_range",
+    });
+
+    assert.equal(recoveryInputs.length, 1);
+    assert.equal(recoveryInputs[0].directorInput.runMode, "auto_to_execution");
+    assert.equal(runningCalls.length, 1);
+    assert.equal(runningCalls[0].stage, "chapter_execution");
+    assert.equal(runningCalls[0].seedPayload.directorSession.runMode, "auto_to_execution");
+    assert.equal(scheduledRuns.length, 1);
+
+    await scheduledRuns[0].runner();
+
+    assert.equal(runtimeCalls.length, 1);
+    assert.equal(runtimeCalls[0].request.runMode, "auto_to_execution");
+    assert.equal(runtimeCalls[0].resumeCheckpointType, "chapter_batch_ready");
+    assert.equal(runtimeNodeInputs[0]?.nodeKey, "chapter_execution_node");
+    assert.equal(runtimeNodeInputs[0]?.input?.policy?.policy?.mode, "auto_safe_scope");
+    assert.equal(runtimeNodeInputs[0]?.input?.policy?.policy?.allowExpensiveReview, true);
+  } finally {
+    service.continueCandidateStageTask = originalContinueCandidateStageTask;
+    service.workflowService.getTaskById = originalGetTaskById;
+    service.resolveAssetFirstRecovery = originalResolveAssetFirstRecovery;
+    service.workflowService.markTaskRunning = originalMarkTaskRunning;
+    service.scheduleBackgroundRun = originalScheduleBackgroundRun;
+    service.autoExecutionRuntime.runFromReady = originalRunFromReady;
+    service.directorRuntime.getSnapshot = originalGetSnapshot;
+    restoreDirectorRunNode();
+  }
+});
+
+test("continueTask does not skip the current chapter when approving a waiting auto-execution checkpoint", async () => {
+  const service = new NovelDirectorService();
+  const originalContinueCandidateStageTask = service.continueCandidateStageTask;
+  const originalGetTaskById = service.workflowService.getTaskById;
+  const originalResolveAssetFirstRecovery = service.resolveAssetFirstRecovery;
+  const originalMarkTaskRunning = service.workflowService.markTaskRunning;
+  const originalScheduleBackgroundRun = service.scheduleBackgroundRun;
+  const originalRunFromReady = service.autoExecutionRuntime.runFromReady;
+  const runningCalls = [];
+  const scheduledRuns = [];
+  const runtimeCalls = [];
+  const restoreDirectorRunNode = stubDirectorRuntimeNode(service);
+
+  service.continueCandidateStageTask = async () => false;
+  service.resolveAssetFirstRecovery = async () => ({
+    type: "auto_execution",
+    resumeCheckpointType: "chapter_batch_ready",
+  });
+  service.workflowService.getTaskById = async () => ({
+    id: "task_waiting_auto_execution_resume",
+    lane: "auto_director",
+    status: "waiting_approval",
+    pendingManualRecovery: false,
+    novelId: "novel_waiting_auto_execution_resume",
+    checkpointType: "chapter_batch_ready",
+    currentItemKey: "quality_repair",
+    resumeTargetJson: JSON.stringify({
+      stage: "pipeline",
+      chapterId: "chapter_6",
+    }),
+    lastError: "Chapter generation is blocked until review is resolved.",
+    seedPayloadJson: JSON.stringify({
+      directorInput: buildDirectorInput({
+        workflowTaskId: "task_waiting_auto_execution_resume",
+        runMode: "auto_to_execution",
+      }),
+      directorSession: {
+        runMode: "auto_to_execution",
+        phase: "chapter_execution",
+        isBackgroundRunning: false,
+        lockedScopes: ["basic", "story_macro", "character", "outline", "structured", "chapter", "pipeline"],
+        reviewScope: null,
+      },
+      autoExecution: {
+        enabled: true,
+        mode: "chapter_range",
+        scopeLabel: "第 5-8 章",
+        startOrder: 5,
+        endOrder: 8,
+        totalChapterCount: 4,
+        nextChapterId: "chapter_6",
+        nextChapterOrder: 6,
+        remainingChapterCount: 3,
+        remainingChapterIds: ["chapter_6", "chapter_7", "chapter_8"],
+        remainingChapterOrders: [6, 7, 8],
+        pipelineJobId: "pipeline_waiting",
+        pipelineStatus: "failed",
+      },
+    }),
+  });
+  service.workflowService.markTaskRunning = async (taskId, input) => {
+    runningCalls.push({ taskId, ...input });
+    return null;
+  };
+  service.scheduleBackgroundRun = (taskId, runner) => {
+    scheduledRuns.push({ taskId, runner });
+  };
+  service.autoExecutionRuntime.runFromReady = async (input) => {
+    runtimeCalls.push(input);
+  };
+
+  try {
+    await service.continueTask("task_waiting_auto_execution_resume", {
+      continuationMode: "auto_execute_range",
+    });
+    assert.equal(runningCalls.length, 1);
+    assert.equal(scheduledRuns.length, 1);
+    assert.equal(runtimeCalls.length, 0);
+
+    await scheduledRuns[0].runner();
+
+    assert.equal(runtimeCalls.length, 1);
+    assert.equal(runtimeCalls[0].taskId, "task_waiting_auto_execution_resume");
+    assert.equal(runtimeCalls[0].novelId, "novel_waiting_auto_execution_resume");
+    assert.equal(runtimeCalls[0].resumeCheckpointType, "chapter_batch_ready");
+    assert.equal(runtimeCalls[0].allowSkipReviewBlockedChapter, false);
+  } finally {
+    service.continueCandidateStageTask = originalContinueCandidateStageTask;
+    service.workflowService.getTaskById = originalGetTaskById;
+    service.resolveAssetFirstRecovery = originalResolveAssetFirstRecovery;
+    service.workflowService.markTaskRunning = originalMarkTaskRunning;
+    service.scheduleBackgroundRun = originalScheduleBackgroundRun;
+    service.autoExecutionRuntime.runFromReady = originalRunFromReady;
+    restoreDirectorRunNode();
+  }
+});
+
+test("continueTask normalizes auto_execute_range into skip_quality_repair at a quality-repair checkpoint", async () => {
+  const service = new NovelDirectorService();
+  const originalContinueCandidateStageTask = service.continueCandidateStageTask;
+  const originalGetTaskById = service.workflowService.getTaskById;
+  const originalResolveAssetFirstRecovery = service.resolveAssetFirstRecovery;
+  const originalMarkTaskRunning = service.workflowService.markTaskRunning;
+  const originalScheduleBackgroundRun = service.scheduleBackgroundRun;
+  const originalRunFromReady = service.autoExecutionRuntime.runFromReady;
+  const runningCalls = [];
+  const scheduledRuns = [];
+  const runtimeCalls = [];
+  const restoreDirectorRunNode = stubDirectorRuntimeNode(service);
+
+  service.continueCandidateStageTask = async () => false;
+  service.resolveAssetFirstRecovery = async () => ({
+    type: "auto_execution",
+    resumeCheckpointType: "replan_required",
+  });
+  service.workflowService.getTaskById = async () => ({
+    id: "task_quality_repair_skip_normalized",
+    lane: "auto_director",
+    status: "waiting_approval",
+    pendingManualRecovery: false,
+    novelId: "novel_quality_repair_skip_normalized",
+    checkpointType: "replan_required",
+    currentStage: "质量修复",
+    currentItemKey: "quality_repair",
+    resumeTargetJson: JSON.stringify({
+      stage: "pipeline",
+      chapterId: "chapter_6",
+    }),
+    lastError: "当前章需要先处理质量修复建议。",
+    seedPayloadJson: JSON.stringify({
+      directorInput: buildDirectorInput({
+        workflowTaskId: "task_quality_repair_skip_normalized",
+        runMode: "auto_to_execution",
+      }),
+      directorSession: {
+        runMode: "auto_to_execution",
+        phase: "chapter_execution",
+        isBackgroundRunning: false,
+        lockedScopes: ["basic", "story_macro", "character", "outline", "structured", "chapter", "pipeline"],
+        reviewScope: null,
+      },
+      autoExecution: {
+        enabled: true,
+        mode: "chapter_range",
+        scopeLabel: "第 5-8 章",
+        startOrder: 5,
+        endOrder: 8,
+        totalChapterCount: 4,
+        nextChapterId: "chapter_6",
+        nextChapterOrder: 6,
+        remainingChapterCount: 3,
+        remainingChapterIds: ["chapter_6", "chapter_7", "chapter_8"],
+        remainingChapterOrders: [6, 7, 8],
+        pipelineJobId: "pipeline_waiting",
+        pipelineStatus: "failed",
+      },
+    }),
+  });
+  service.workflowService.markTaskRunning = async (taskId, input) => {
+    runningCalls.push({ taskId, ...input });
+    return null;
+  };
+  service.scheduleBackgroundRun = (taskId, runner) => {
+    scheduledRuns.push({ taskId, runner });
+  };
+  service.autoExecutionRuntime.runFromReady = async (input) => {
+    runtimeCalls.push(input);
+  };
+
+  try {
+    await service.continueTask("task_quality_repair_skip_normalized", {
+      continuationMode: "auto_execute_range",
+    });
+    assert.equal(runningCalls.length, 1);
+    assert.equal(runningCalls[0].stage, "quality_repair");
+    assert.equal(scheduledRuns.length, 1);
+
+    await scheduledRuns[0].runner();
+
+    assert.equal(runtimeCalls.length, 1);
+    assert.equal(runtimeCalls[0].resumeCheckpointType, "replan_required");
+    assert.equal(runtimeCalls[0].skipCurrentQualityRepair, true);
+    assert.equal(runtimeCalls[0].approveAutoExecutionScope, true);
+  } finally {
+    service.continueCandidateStageTask = originalContinueCandidateStageTask;
+    service.workflowService.getTaskById = originalGetTaskById;
+    service.resolveAssetFirstRecovery = originalResolveAssetFirstRecovery;
+    service.workflowService.markTaskRunning = originalMarkTaskRunning;
+    service.scheduleBackgroundRun = originalScheduleBackgroundRun;
+    service.autoExecutionRuntime.runFromReady = originalRunFromReady;
+    restoreDirectorRunNode();
+  }
+});
+
+test("continueTask resumes structured outline when stale chapter_range checkpoint lacks a fully detailed range", async () => {
+  const service = new NovelDirectorService();
+  const originalContinueCandidateStageTask = service.continueCandidateStageTask;
+  const originalGetTaskById = service.workflowService.getTaskById;
+  const originalResolveAssetFirstRecovery = service.resolveAssetFirstRecovery;
+  const originalAssertHighMemoryDirectorStartAllowed = service.assertHighMemoryDirectorStartAllowed;
+  const originalBootstrapTask = service.workflowService.bootstrapTask;
+  const originalMarkTaskRunning = service.workflowService.markTaskRunning;
+  const originalScheduleBackgroundRun = service.scheduleBackgroundRun;
+  const originalRunDirectorPipeline = service.runDirectorPipeline;
+  const originalRunFromReady = service.autoExecutionRuntime.runFromReady;
+  const bootstrapCalls = [];
+  const runningCalls = [];
+  const scheduledRuns = [];
+  const pipelineRuns = [];
+  const runtimeCalls = [];
+
+  service.continueCandidateStageTask = async () => false;
+  service.resolveAssetFirstRecovery = async () => ({
+    type: "phase",
+    phase: "structured_outline",
+  });
+  service.assertHighMemoryDirectorStartAllowed = async () => undefined;
+  service.workflowService.getTaskById = async () => ({
+    id: "task_stale_chapter_range_resume",
+    lane: "auto_director",
+    status: "waiting_approval",
+    pendingManualRecovery: false,
+    novelId: "novel_stale_chapter_range_resume",
+    checkpointType: "chapter_batch_ready",
+    currentItemKey: "chapter_batch_ready",
+    resumeTargetJson: JSON.stringify({
+      stage: "structured_outline",
+      volumeId: "volume_1",
+    }),
+    seedPayloadJson: JSON.stringify({
+      directorInput: buildDirectorInput({
+        workflowTaskId: "task_stale_chapter_range_resume",
+        runMode: "auto_to_ready",
+      }),
+      directorSession: {
+        runMode: "auto_to_ready",
+        phase: "front10_ready",
+        isBackgroundRunning: false,
+        lockedScopes: ["basic", "story_macro", "character", "outline", "structured", "chapter", "pipeline"],
+        reviewScope: null,
+      },
+      autoExecution: {
+        enabled: true,
+        mode: "chapter_range",
+        scopeLabel: "第 1-10 章",
+        startOrder: 1,
+        endOrder: 10,
+        totalChapterCount: 10,
+        nextChapterId: "chapter_1",
+        nextChapterOrder: 1,
+      },
+    }),
+  });
+  service.workflowService.bootstrapTask = async (input) => {
+    bootstrapCalls.push(input);
+    return { id: "task_stale_chapter_range_resume" };
+  };
+  service.workflowService.markTaskRunning = async (taskId, input) => {
+    runningCalls.push({ taskId, ...input });
+    return null;
+  };
+  service.scheduleBackgroundRun = (taskId, runner) => {
+    scheduledRuns.push({ taskId, runner });
+  };
+  service.runDirectorPipeline = async (input) => {
+    pipelineRuns.push(input);
+  };
+  service.autoExecutionRuntime.runFromReady = async (input) => {
+    runtimeCalls.push(input);
+  };
+
+  try {
+    await service.continueTask("task_stale_chapter_range_resume", {
+      continuationMode: "auto_execute_range",
+    });
+
+    assert.equal(bootstrapCalls.length, 1);
+    assert.equal(runningCalls.length, 1);
+    assert.equal(runningCalls[0].stage, "structured_outline");
+    assert.equal(scheduledRuns.length, 1);
+    assert.equal(runtimeCalls.length, 0);
+
+    await scheduledRuns[0].runner();
+
+    assert.equal(pipelineRuns.length, 1);
+    assert.equal(pipelineRuns[0].taskId, "task_stale_chapter_range_resume");
+    assert.equal(pipelineRuns[0].novelId, "novel_stale_chapter_range_resume");
+    assert.equal(pipelineRuns[0].startPhase, "structured_outline");
+    assert.equal(pipelineRuns[0].input.runMode, "auto_to_execution");
+    assert.equal(pipelineRuns[0].approveAutoExecutionScope, true);
+    assert.equal(runtimeCalls.length, 0);
+  } finally {
+    service.continueCandidateStageTask = originalContinueCandidateStageTask;
+    service.workflowService.getTaskById = originalGetTaskById;
+    service.resolveAssetFirstRecovery = originalResolveAssetFirstRecovery;
+    service.assertHighMemoryDirectorStartAllowed = originalAssertHighMemoryDirectorStartAllowed;
+    service.workflowService.bootstrapTask = originalBootstrapTask;
+    service.workflowService.markTaskRunning = originalMarkTaskRunning;
+    service.scheduleBackgroundRun = originalScheduleBackgroundRun;
+    service.runDirectorPipeline = originalRunDirectorPipeline;
     service.autoExecutionRuntime.runFromReady = originalRunFromReady;
   }
 });
 
 test("runDirectorStructuredOutlinePhase resumes from the first incomplete beat and missing detail mode", async () => {
+  const originals = {
+    chapterFindMany: prisma.chapter.findMany,
+    transaction: prisma.$transaction,
+  };
   const baseWorkspace = createStructuredOutlineWorkspace();
   const chapterListCompletedWorkspace = buildVolumeWorkspaceDocument({
     ...baseWorkspace,
@@ -600,7 +1242,19 @@ test("runDirectorStructuredOutlinePhase resumes from the first incomplete beat a
           ...volume,
           chapters: volume.chapters.map((chapter) => ({
             ...chapter,
+            purpose: chapter.purpose ?? "第二卷章节目标",
+            exclusiveEvent: "第二卷章节独占事件",
+            endingState: "第二卷章节结束态",
+            nextChapterEntryState: "第二卷章节下章入口",
+            conflictLevel: chapter.conflictLevel ?? 3,
+            revealLevel: chapter.revealLevel ?? 2,
+            targetWordCount: chapter.targetWordCount ?? 2600,
+            mustAvoid: chapter.mustAvoid ?? "不要提前透底",
             taskSheet: "第二卷章节任务单",
+            sceneCards: createSceneCards({
+              ...chapter,
+              targetWordCount: chapter.targetWordCount ?? 2600,
+            }),
           })),
         }
         : volume
@@ -612,81 +1266,115 @@ test("runDirectorStructuredOutlinePhase resumes from the first incomplete beat a
   const runningUpdates = [];
   const workflowRunningCalls = [];
   const checkpointCalls = [];
+  prisma.chapter.findMany = async () => [{ id: "volume-2-chapter-1" }];
+  prisma.$transaction = async (callback) => callback({
+    chapter: { updateMany: async () => ({ count: 1 }) },
+    chapterSummary: { deleteMany: async () => ({ count: 0 }) },
+    consistencyFact: { deleteMany: async () => ({ count: 0 }) },
+    characterTimeline: { deleteMany: async () => ({ count: 0 }) },
+    characterCandidate: { deleteMany: async () => ({ count: 0 }) },
+    characterFactionTrack: { deleteMany: async () => ({ count: 0 }) },
+    characterRelationStage: { deleteMany: async () => ({ count: 0 }) },
+    qualityReport: { deleteMany: async () => ({ count: 0 }) },
+    auditReport: { deleteMany: async () => ({ count: 0 }) },
+    stateChangeProposal: { deleteMany: async () => ({ count: 0 }) },
+    openConflict: { deleteMany: async () => ({ count: 0 }) },
+    storyStateSnapshot: { deleteMany: async () => ({ count: 0 }) },
+  });
 
-  await runDirectorStructuredOutlinePhase({
-    taskId: "task_structured_resume",
-    novelId: "novel_resume_outline",
-    request: buildDirectorInput({
-      workflowTaskId: "task_structured_resume",
-      runMode: "auto_to_execution",
-      autoExecutionPlan: {
-        mode: "volume",
-        volumeOrder: 2,
-      },
-    }),
-    baseWorkspace,
-    dependencies: {
-      workflowService: {
-        bootstrapTask: async () => ({ id: "task_structured_resume" }),
-        markTaskRunning: async (taskId, input) => {
-          workflowRunningCalls.push({ taskId, ...input });
-          return null;
+  try {
+    await runDirectorStructuredOutlinePhase({
+      taskId: "task_structured_resume",
+      novelId: "novel_resume_outline",
+      request: buildDirectorInput({
+        workflowTaskId: "task_structured_resume",
+        runMode: "auto_to_execution",
+        autoExecutionPlan: {
+          mode: "volume",
+          volumeOrder: 2,
         },
-        recordCheckpoint: async (taskId, input) => {
-          checkpointCalls.push({ taskId, ...input });
-          return null;
+      }),
+      baseWorkspace,
+      dependencies: {
+        workflowService: {
+          bootstrapTask: async () => ({ id: "task_structured_resume" }),
+          markTaskRunning: async (taskId, input) => {
+            workflowRunningCalls.push({ taskId, ...input });
+            return null;
+          },
+          recordCheckpoint: async (taskId, input) => {
+            checkpointCalls.push({ taskId, ...input });
+            return null;
+          },
         },
-      },
-      novelContextService: {
-        listChapters: async () => [
+        novelContextService: {
+          listChapters: async () => [
           {
             id: "volume-2-chapter-1",
-            order: 1,
+            order: 2,
             generationState: "planned",
+              conflictLevel: 3,
+              revealLevel: 2,
+              targetWordCount: 2600,
+              mustAvoid: "不要提前透底",
+              taskSheet: "第二卷章节任务单",
+              sceneCards: createSceneCards({
+                id: "volume-2-chapter-1",
+                targetWordCount: 2600,
+              }),
+            },
+          ],
+          updateNovel: async () => null,
+        },
+        characterDynamicsService: {
+          rebuildDynamics: async () => null,
+        },
+        characterPreparationService: {},
+        volumeService: {
+          generateVolumes: async (novelId, options) => {
+            generateCalls.push({ novelId, ...options });
+            if (options.scope === "chapter_list") {
+              return chapterListCompletedWorkspace;
+            }
+            if (options.scope === "chapter_detail") {
+              return detailCompletedWorkspace;
+            }
+            throw new Error(`unexpected scope: ${options.scope}`);
           },
-        ],
-        updateNovel: async () => null,
-      },
-      characterDynamicsService: {
-        rebuildDynamics: async () => null,
-      },
-      characterPreparationService: {},
-      volumeService: {
-        generateVolumes: async (novelId, options) => {
-          generateCalls.push({ novelId, ...options });
-          if (options.scope === "chapter_list") {
-            return chapterListCompletedWorkspace;
-          }
-          if (options.scope === "chapter_detail") {
-            return detailCompletedWorkspace;
-          }
-          throw new Error(`unexpected scope: ${options.scope}`);
+          updateVolumes: async (novelId, workspace) => {
+            persistCalls.push({ novelId, workspace });
+            return workspace;
+          },
+          updateVolumesWithOptions: async (novelId, workspace) => {
+            persistCalls.push({ novelId, workspace });
+            return workspace;
+          },
+          syncVolumeChapters: async () => ({ preview: [] }),
+          syncVolumeChaptersWithOptions: async () => ({ preview: [] }),
         },
-        updateVolumes: async (novelId, workspace) => {
-          persistCalls.push({ novelId, workspace });
-          return workspace;
+      },
+      callbacks: {
+        buildDirectorSeedPayload: (request, novelId, extra = {}) => ({
+          directorInput: request,
+          novelId,
+          ...extra,
+        }),
+        markDirectorTaskRunning: async (taskId, stage, itemKey, itemLabel, progress, options) => {
+          runningUpdates.push({
+            taskId,
+            stage,
+            itemKey,
+            itemLabel,
+            progress,
+            options,
+          });
         },
-        syncVolumeChapters: async () => ({ preview: [] }),
       },
-    },
-    callbacks: {
-      buildDirectorSeedPayload: (request, novelId, extra = {}) => ({
-        directorInput: request,
-        novelId,
-        ...extra,
-      }),
-      markDirectorTaskRunning: async (taskId, stage, itemKey, itemLabel, progress, options) => {
-        runningUpdates.push({
-          taskId,
-          stage,
-          itemKey,
-          itemLabel,
-          progress,
-          options,
-        });
-      },
-    },
-  });
+    });
+  } finally {
+    prisma.chapter.findMany = originals.chapterFindMany;
+    prisma.$transaction = originals.transaction;
+  }
 
   assert.deepEqual(
     generateCalls.map((call) => ({
@@ -710,6 +1398,8 @@ test("runDirectorStructuredOutlinePhase resumes from the first incomplete beat a
       },
     ],
   );
+  const chapterListCall = generateCalls.find((call) => call.scope === "chapter_list");
+  assert.equal(chapterListCall.persistIntermediateDocuments, true);
   assert.equal(persistCalls.length, 3);
   assert.ok(runningUpdates.some((update) => (
     update.itemKey === "chapter_detail_bundle"
@@ -720,4 +1410,45 @@ test("runDirectorStructuredOutlinePhase resumes from the first incomplete beat a
   assert.equal(checkpointCalls.length, 1);
   assert.equal(checkpointCalls[0].volumeId, "volume-2");
   assert.equal(checkpointCalls[0].chapterId, "volume-2-chapter-1");
+});
+
+test("runDirectorTrackedStep aborts the run helper signal when heartbeat observes cancellation", { timeout: 8000 }, async () => {
+  let markCallCount = 0;
+  let helperSignal = null;
+
+  await assert.rejects(
+    () => runDirectorTrackedStep({
+      taskId: "task_cancel_signal",
+      stage: "structured_outline",
+      itemKey: "beat_sheet",
+      itemLabel: "正在生成节奏板",
+      progress: 0.72,
+      heartbeatMs: 5000,
+      callbacks: {
+        markDirectorTaskRunning: async () => {
+          markCallCount += 1;
+          if (markCallCount > 1) {
+            throw new Error("WORKFLOW_TASK_CANCELLED");
+          }
+        },
+      },
+      run: async ({ signal }) => {
+        helperSignal = signal;
+        assert.ok(signal, "expected tracked step helper to expose an AbortSignal");
+        await new Promise((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            reject(new Error("expected heartbeat cancellation to abort the signal"));
+          }, 6500);
+          signal.addEventListener("abort", () => {
+            clearTimeout(timeout);
+            reject(signal.reason ?? new Error("aborted"));
+          }, { once: true });
+        });
+      },
+    }),
+    /取消|cancel/i,
+  );
+
+  assert.ok(helperSignal?.aborted);
+  assert.ok(markCallCount > 1);
 });

@@ -2,7 +2,10 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const http = require("node:http");
 const { createApp } = require("../dist/app.js");
-const { NovelService } = require("../dist/services/novel/NovelService.js");
+const {
+  DefaultNovelApplicationServices,
+} = require("../dist/services/novel/application/NovelApplicationServices.js");
+const { AppError } = require("../dist/middleware/errorHandler.js");
 
 function listen(server) {
   return new Promise((resolve) => {
@@ -193,32 +196,36 @@ function createSyncPreview() {
 
 test("volume routes cover workspace, versions, impact analysis, sync and legacy migration contracts", async () => {
   const originalMethods = {
-    getVolumes: NovelService.prototype.getVolumes,
-    generateVolumes: NovelService.prototype.generateVolumes,
-    updateVolumes: NovelService.prototype.updateVolumes,
-    listVolumeVersions: NovelService.prototype.listVolumeVersions,
-    createVolumeDraft: NovelService.prototype.createVolumeDraft,
-    activateVolumeVersion: NovelService.prototype.activateVolumeVersion,
-    freezeVolumeVersion: NovelService.prototype.freezeVolumeVersion,
-    getVolumeDiff: NovelService.prototype.getVolumeDiff,
-    analyzeVolumeImpact: NovelService.prototype.analyzeVolumeImpact,
-    syncVolumeChapters: NovelService.prototype.syncVolumeChapters,
-    migrateLegacyVolumes: NovelService.prototype.migrateLegacyVolumes,
+    getVolumes: DefaultNovelApplicationServices.prototype.getVolumes,
+    generateVolumes: DefaultNovelApplicationServices.prototype.generateVolumes,
+    updateVolumes: DefaultNovelApplicationServices.prototype.updateVolumes,
+    listVolumeVersions: DefaultNovelApplicationServices.prototype.listVolumeVersions,
+    createVolumeDraft: DefaultNovelApplicationServices.prototype.createVolumeDraft,
+    activateVolumeVersion: DefaultNovelApplicationServices.prototype.activateVolumeVersion,
+    freezeVolumeVersion: DefaultNovelApplicationServices.prototype.freezeVolumeVersion,
+    getVolumeDiff: DefaultNovelApplicationServices.prototype.getVolumeDiff,
+    analyzeVolumeImpact: DefaultNovelApplicationServices.prototype.analyzeVolumeImpact,
+    syncVolumeChapters: DefaultNovelApplicationServices.prototype.syncVolumeChapters,
+    migrateLegacyVolumes: DefaultNovelApplicationServices.prototype.migrateLegacyVolumes,
   };
   const novelId = "novel-volume-route-test";
   const workspace = createWorkspace(novelId);
+  const updateCalls = [];
 
-  NovelService.prototype.getVolumes = async () => workspace;
-  NovelService.prototype.generateVolumes = async () => workspace;
-  NovelService.prototype.updateVolumes = async () => workspace;
-  NovelService.prototype.listVolumeVersions = async () => [createVersion(2, "draft"), createVersion(1, "active")];
-  NovelService.prototype.createVolumeDraft = async () => createVersion(3, "draft");
-  NovelService.prototype.activateVolumeVersion = async () => createVersion(2, "active");
-  NovelService.prototype.freezeVolumeVersion = async () => createVersion(2, "frozen");
-  NovelService.prototype.getVolumeDiff = async () => createDiff(novelId);
-  NovelService.prototype.analyzeVolumeImpact = async () => createImpact(novelId);
-  NovelService.prototype.syncVolumeChapters = async () => createSyncPreview();
-  NovelService.prototype.migrateLegacyVolumes = async () => ({
+  DefaultNovelApplicationServices.prototype.getVolumes = async () => workspace;
+  DefaultNovelApplicationServices.prototype.generateVolumes = async () => workspace;
+  DefaultNovelApplicationServices.prototype.updateVolumes = async (_id, input) => {
+    updateCalls.push(input);
+    return workspace;
+  };
+  DefaultNovelApplicationServices.prototype.listVolumeVersions = async () => [createVersion(2, "draft"), createVersion(1, "active")];
+  DefaultNovelApplicationServices.prototype.createVolumeDraft = async () => createVersion(3, "draft");
+  DefaultNovelApplicationServices.prototype.activateVolumeVersion = async () => createVersion(2, "active");
+  DefaultNovelApplicationServices.prototype.freezeVolumeVersion = async () => createVersion(2, "frozen");
+  DefaultNovelApplicationServices.prototype.getVolumeDiff = async () => createDiff(novelId);
+  DefaultNovelApplicationServices.prototype.analyzeVolumeImpact = async () => createImpact(novelId);
+  DefaultNovelApplicationServices.prototype.syncVolumeChapters = async () => createSyncPreview();
+  DefaultNovelApplicationServices.prototype.migrateLegacyVolumes = async () => ({
     ...workspace,
     source: "legacy",
   });
@@ -242,6 +249,45 @@ test("volume routes cover workspace, versions, impact analysis, sync and legacy 
       body: JSON.stringify({ scope: "strategy" }),
     });
     assert.equal(strategyResponse.status, 200);
+
+    const slimChapterListResponse = await fetch(`http://127.0.0.1:${port}/api/novels/${novelId}/volumes/generate`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        scope: "chapter_list",
+        targetVolumeId: "volume-1",
+        slimResponse: true,
+      }),
+    });
+    assert.equal(slimChapterListResponse.status, 200);
+    const slimChapterListPayload = await slimChapterListResponse.json();
+    assert.equal(slimChapterListPayload.data.slimmed, true);
+    assert.equal(slimChapterListPayload.data.derivedOutline, "");
+    assert.equal(slimChapterListPayload.data.critiqueReport, null);
+    assert.deepEqual(slimChapterListPayload.data.volumes, []);
+    assert.deepEqual(slimChapterListPayload.data.beatSheets, []);
+    assert.equal(updateCalls.length, 0);
+
+    const slimBeatSheetResponse = await fetch(`http://127.0.0.1:${port}/api/novels/${novelId}/volumes/generate`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        scope: "beat_sheet",
+        targetVolumeId: "volume-1",
+        slimResponse: true,
+      }),
+    });
+    assert.equal(slimBeatSheetResponse.status, 200);
+    const slimBeatSheetPayload = await slimBeatSheetResponse.json();
+    assert.equal(slimBeatSheetPayload.data.slimmed, true);
+    assert.equal(slimBeatSheetPayload.data.derivedStructuredOutline, "");
+    assert.deepEqual(slimBeatSheetPayload.data.rebalanceDecisions, []);
+    assert.equal(updateCalls.length, 1);
+    assert.equal(updateCalls.at(-1).syncToChapterExecution, false);
 
     const draftResponse = await fetch(`http://127.0.0.1:${port}/api/novels/${novelId}/volumes/versions/draft`, {
       method: "POST",
@@ -342,7 +388,37 @@ test("volume routes cover workspace, versions, impact analysis, sync and legacy 
     });
     assert.equal(missingTargetResponse.status, 400);
   } finally {
-    Object.assign(NovelService.prototype, originalMethods);
+    Object.assign(DefaultNovelApplicationServices.prototype, originalMethods);
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test("volume generate route returns user-correctable 409 for duplicate high-memory work", async () => {
+  const originalGenerateVolumes = DefaultNovelApplicationServices.prototype.generateVolumes;
+  DefaultNovelApplicationServices.prototype.generateVolumes = async () => {
+    throw new AppError("当前小说已有高内存卷规划生成正在处理同一范围，请稍后再试。", 409);
+  };
+
+  const app = createApp();
+  const server = http.createServer(app);
+  const port = await listen(server);
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/api/novels/novel-volume-route-test/volumes/generate`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        scope: "chapter_list",
+        targetVolumeId: "volume-1",
+      }),
+    });
+    assert.equal(response.status, 409);
+    const payload = await response.json();
+    assert.equal(payload.success, false);
+    assert.match(payload.error, /已有高内存卷规划生成/);
+  } finally {
+    DefaultNovelApplicationServices.prototype.generateVolumes = originalGenerateVolumes;
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 });

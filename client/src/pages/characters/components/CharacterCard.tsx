@@ -3,7 +3,7 @@ import type { ImageAsset } from "@ai-novel/shared/types/image";
 import { resolveImageAssetUrl } from "@/api/images";
 import type { BaseCharacter } from "@ai-novel/shared/types/novel";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { AppDialogContent, Dialog } from "@/components/ui/dialog";
 
 interface CharacterCardProps {
   character: BaseCharacter;
@@ -11,9 +11,11 @@ interface CharacterCardProps {
   assetsLoading?: boolean;
   onGenerateImage: () => void;
   onSetPrimary: (assetId: string) => void;
+  onDeleteAsset: (asset: ImageAsset) => Promise<void>;
   onEdit: () => void;
   onDelete: () => void;
   settingPrimary?: boolean;
+  deletingAssetId?: string | null;
   deleting?: boolean;
   extraActions?: ReactNode;
 }
@@ -24,13 +26,28 @@ export function CharacterCard({
   assetsLoading,
   onGenerateImage,
   onSetPrimary,
+  onDeleteAsset,
   onEdit,
   onDelete,
   settingPrimary,
+  deletingAssetId,
   deleting,
   extraActions,
 }: CharacterCardProps) {
   const [previewAsset, setPreviewAsset] = useState<ImageAsset | null>(null);
+
+  const handleDeleteAsset = async (asset: ImageAsset) => {
+    const confirmed = window.confirm("确认删除这张形象图？此操作不可恢复。");
+    if (!confirmed) {
+      return;
+    }
+    try {
+      await onDeleteAsset(asset);
+      setPreviewAsset((current) => (current?.id === asset.id ? null : current));
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "删除图片失败，请稍后重试。");
+    }
+  };
 
   return (
     <div className="space-y-3 rounded-md border p-3">
@@ -89,14 +106,24 @@ export function CharacterCard({
                 </div>
                 <div className="flex items-center justify-between gap-2">
                   <div className="text-xs text-muted-foreground">{asset.isPrimary ? "主图" : "候选图"}</div>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={asset.isPrimary || settingPrimary}
-                    onClick={() => onSetPrimary(asset.id)}
-                  >
-                    设为主图
-                  </Button>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={asset.isPrimary || settingPrimary || deletingAssetId === asset.id}
+                      onClick={() => onSetPrimary(asset.id)}
+                    >
+                      设为主图
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="destructive"
+                      disabled={deletingAssetId === asset.id}
+                      onClick={() => void handleDeleteAsset(asset)}
+                    >
+                      {deletingAssetId === asset.id ? "删除中..." : "删除"}
+                    </Button>
+                  </div>
                 </div>
               </div>
             ))}
@@ -112,19 +139,41 @@ export function CharacterCard({
           }
         }}
       >
-        <DialogContent className="w-[96vw] max-w-[1000px]">
-          <DialogHeader>
-            <DialogTitle>{previewAsset ? `${character.name} - 图片预览` : "图片预览"}</DialogTitle>
-          </DialogHeader>
+        <AppDialogContent
+          className="max-w-[1000px]"
+          title={previewAsset ? `${character.name} - 图片预览` : "图片预览"}
+          bodyClassName="space-y-3"
+          footer={previewAsset ? (
+            <>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={previewAsset.isPrimary || settingPrimary || deletingAssetId === previewAsset.id}
+                onClick={() => onSetPrimary(previewAsset.id)}
+              >
+                设为主图
+              </Button>
+              <Button
+                type="button"
+                variant="destructive"
+                disabled={deletingAssetId === previewAsset.id}
+                onClick={() => void handleDeleteAsset(previewAsset)}
+              >
+                {deletingAssetId === previewAsset.id ? "删除中..." : "删除图片"}
+              </Button>
+            </>
+          ) : null}
+          footerClassName="gap-2"
+        >
           {previewAsset ? (
             <>
-            <div className="flex max-h-[78vh] items-center justify-center overflow-auto rounded-md bg-muted/30 p-2">
-              <img
-                src={resolveImageAssetUrl(previewAsset.url)}
-                alt={`${character.name}-预览图`}
-                className="max-h-[72vh] w-auto max-w-full rounded-md object-contain"
-              />
-            </div>
+              <div className="flex max-h-[70vh] items-center justify-center overflow-auto rounded-md bg-muted/30 p-2">
+                <img
+                  src={resolveImageAssetUrl(previewAsset.url)}
+                  alt={`${character.name}-预览图`}
+                  className="max-h-[66vh] w-auto max-w-full rounded-md object-contain"
+                />
+              </div>
               {previewAsset.localPath ? (
                 <div className="text-xs text-muted-foreground break-all">
                   本地路径：{previewAsset.localPath}
@@ -132,7 +181,7 @@ export function CharacterCard({
               ) : null}
             </>
           ) : null}
-        </DialogContent>
+        </AppDialogContent>
       </Dialog>
     </div>
   );

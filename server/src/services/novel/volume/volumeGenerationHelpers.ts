@@ -15,9 +15,13 @@ import {
   serializeChapterScenePlan,
 } from "@ai-novel/shared/types/chapterLengthControl";
 import { runStructuredPrompt } from "../../../prompting/core/promptRunner";
-import { volumeChapterTaskSheetPrompt } from "../../../prompting/prompts/novel/volume/chapterDetail.prompts";
+import { volumeChapterExecutionContractPrompt } from "../../../prompting/prompts/novel/volume/chapterDetail.prompts";
 import { buildVolumeChapterDetailContextBlocks } from "../../../prompting/prompts/novel/volume/contextBlocks";
 import type { StoryMacroPlanService } from "../storyMacro/StoryMacroPlanService";
+import {
+  ChapterTaskSheetQualityGateService,
+  ChapterTaskSheetQualityGateError,
+} from "./ChapterTaskSheetQualityGateService";
 import { buildVolumeWorkspaceDocument } from "./volumeWorkspaceDocument";
 import type {
   ChapterDetailMode,
@@ -25,6 +29,10 @@ import type {
   VolumeGenerationNovel,
   VolumeWorkspace,
 } from "./volumeModels";
+export {
+  allocateChapterBudgets,
+  deriveChapterBudget,
+} from "./volumeChapterBudgetAllocation";
 
 type StoryMacroPlanResult = Awaited<ReturnType<StoryMacroPlanService["getPlan"]>> | null;
 
@@ -39,6 +47,60 @@ export interface GeneratedVolumeChapterBlock {
   }>;
 }
 
+export const VOLUME_CHAPTER_LIST_PARTIAL_STATUS_PREFIX = "chapter_list_partial";
+
+export function isVolumeChapterListPartiallyPersisted(volume: Pick<VolumePlan, "status">): boolean {
+  const normalizedStatus = volume.status?.trim() ?? "";
+  return normalizedStatus === VOLUME_CHAPTER_LIST_PARTIAL_STATUS_PREFIX
+    || normalizedStatus.startsWith(`${VOLUME_CHAPTER_LIST_PARTIAL_STATUS_PREFIX}:`);
+}
+
+function resolveOriginalVolumeStatus(status: string): string {
+  const normalizedStatus = status.trim();
+  const prefixedStatus = `${VOLUME_CHAPTER_LIST_PARTIAL_STATUS_PREFIX}:`;
+  if (normalizedStatus.startsWith(prefixedStatus)) {
+    return normalizedStatus.slice(prefixedStatus.length).trim() || "active";
+  }
+  if (normalizedStatus === VOLUME_CHAPTER_LIST_PARTIAL_STATUS_PREFIX) {
+    return "active";
+  }
+  return normalizedStatus || "active";
+}
+
+function withVolumeChapterListPartialStatus(volume: VolumePlan, markAsPartial: boolean): VolumePlan {
+  if (markAsPartial) {
+    return {
+      ...volume,
+      status: isVolumeChapterListPartiallyPersisted(volume)
+        ? volume.status
+        : `${VOLUME_CHAPTER_LIST_PARTIAL_STATUS_PREFIX}:${resolveOriginalVolumeStatus(volume.status)}`,
+    };
+  }
+  return {
+    ...volume,
+    status: resolveOriginalVolumeStatus(volume.status),
+  };
+}
+
+export function setVolumeChapterListPartialStatus(
+  document: VolumePlanDocument,
+  targetVolumeId: string,
+  markAsPartial: boolean,
+): VolumePlanDocument {
+  return buildVolumeWorkspaceDocument({
+    novelId: document.novelId,
+    volumes: document.volumes.map((volume) => (
+      volume.id === targetVolumeId ? withVolumeChapterListPartialStatus(volume, markAsPartial) : volume
+    )),
+    strategyPlan: document.strategyPlan,
+    critiqueReport: document.critiqueReport,
+    beatSheets: document.beatSheets,
+    rebalanceDecisions: document.rebalanceDecisions,
+    source: "volume",
+    activeVersionId: document.activeVersionId,
+  });
+}
+
 export function normalizeScope(scope?: VolumeGenerationScopeInput): VolumeGenerationScope {
   if (scope === "book") {
     return "skeleton";
@@ -47,55 +109,6 @@ export function normalizeScope(scope?: VolumeGenerationScopeInput): VolumeGenera
     return "chapter_list";
   }
   return scope ?? "strategy";
-}
-
-export function deriveChapterBudget(params: {
-  novel: VolumeGenerationNovel;
-  workspace: VolumeWorkspace;
-  options: VolumeGenerateOptions;
-}): number {
-  const { novel, workspace, options } = params;
-  return Math.max(
-    options.estimatedChapterCount ?? 0,
-    novel.estimatedChapterCount ?? 0,
-    workspace.volumes.flatMap((volume) => volume.chapters).length,
-    12,
-  );
-}
-
-export function allocateChapterBudgets(params: {
-  volumeCount: number;
-  chapterBudget: number;
-  existingVolumes: VolumePlan[];
-}): number[] {
-  const { volumeCount, chapterBudget, existingVolumes } = params;
-  const safeVolumeCount = Math.max(volumeCount, 1);
-  const minimumPerVolume = 3;
-  const totalBudget = Math.max(chapterBudget, safeVolumeCount * minimumPerVolume);
-  const existingCounts = Array.from(
-    { length: safeVolumeCount },
-    (_, index) => Math.max(existingVolumes[index]?.chapters.length ?? 0, 0),
-  );
-  const hasUsefulWeights = existingCounts.some((count) => count >= minimumPerVolume);
-  const weights = hasUsefulWeights
-    ? existingCounts.map((count) => Math.max(count, 1))
-    : Array.from({ length: safeVolumeCount }, () => 1);
-  const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
-  const budgets = weights.map((weight) => Math.max(minimumPerVolume, Math.round((totalBudget * weight) / totalWeight)));
-  let delta = totalBudget - budgets.reduce((sum, budget) => sum + budget, 0);
-
-  while (delta !== 0) {
-    const direction = delta > 0 ? 1 : -1;
-    for (let index = 0; index < budgets.length && delta !== 0; index += 1) {
-      if (direction < 0 && budgets[index] <= minimumPerVolume) {
-        continue;
-      }
-      budgets[index] += direction;
-      delta -= direction;
-    }
-  }
-
-  return budgets;
 }
 
 export function getTargetVolume(document: VolumePlanDocument, targetVolumeId?: string): VolumePlan {
@@ -375,6 +388,7 @@ export function mergeChapterList(
     generationMode?: VolumeChapterListGenerationMode;
     targetBeatKey?: string;
     resumeFromBeatKey?: string | null;
+    markAsPartial?: boolean;
   } = {},
 ): VolumePlanDocument {
   const mergedVolumes = document.volumes.map((volume) => {
@@ -454,13 +468,13 @@ export function mergeChapterList(
       nextChapters.push(...preservedUnmatched);
     }
 
-    return {
+    return withVolumeChapterListPartialStatus({
       ...volume,
       chapters: nextChapters.map((chapter, chapterIndex) => ({
         ...chapter,
         chapterOrder: chapterIndex + 1,
       })),
-    };
+    }, options.markAsPartial === true);
   });
 
   return buildVolumeWorkspaceDocument({
@@ -518,6 +532,19 @@ export function mergeChapterDetail(params: {
         }
         return {
           ...chapter,
+          purpose: typeof generatedDetail.purpose === "string" ? generatedDetail.purpose : chapter.purpose,
+          exclusiveEvent: typeof generatedDetail.exclusiveEvent === "string" ? generatedDetail.exclusiveEvent : chapter.exclusiveEvent,
+          endingState: typeof generatedDetail.endingState === "string" ? generatedDetail.endingState : chapter.endingState,
+          nextChapterEntryState: typeof generatedDetail.nextChapterEntryState === "string"
+            ? generatedDetail.nextChapterEntryState
+            : chapter.nextChapterEntryState,
+          conflictLevel: typeof generatedDetail.conflictLevel === "number" ? generatedDetail.conflictLevel : chapter.conflictLevel,
+          revealLevel: typeof generatedDetail.revealLevel === "number" ? generatedDetail.revealLevel : chapter.revealLevel,
+          targetWordCount: typeof generatedDetail.targetWordCount === "number" ? generatedDetail.targetWordCount : chapter.targetWordCount,
+          mustAvoid: typeof generatedDetail.mustAvoid === "string" ? generatedDetail.mustAvoid : chapter.mustAvoid,
+          payoffRefs: Array.isArray(generatedDetail.payoffRefs)
+            ? generatedDetail.payoffRefs.filter((item): item is string => typeof item === "string")
+            : chapter.payoffRefs,
           taskSheet: typeof generatedDetail.taskSheet === "string" ? generatedDetail.taskSheet : chapter.taskSheet,
           sceneCards: typeof generatedDetail.sceneCards === "string" ? generatedDetail.sceneCards : chapter.sceneCards,
         };
@@ -550,31 +577,102 @@ export async function generateChapterTaskSheetDetail(params: {
     detailMode: "task_sheet";
   };
   options: VolumeGenerateOptions;
-}): Promise<{ taskSheet: string; sceneCards: string }> {
+}): Promise<{
+  purpose: string;
+  exclusiveEvent: string;
+  endingState: string;
+  nextChapterEntryState: string;
+  conflictLevel: number;
+  revealLevel: number;
+  targetWordCount: number;
+  mustAvoid: string;
+  payoffRefs: string[];
+  taskSheet: string;
+  sceneCards: string;
+}> {
   let lastError: Error | null = null;
+  let qualityFeedback: string | null = null;
+  const qualityGate = new ChapterTaskSheetQualityGateService();
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
+      const promptInput = qualityFeedback
+        ? {
+          ...params.promptInput,
+          guidance: [
+            params.promptInput.guidance?.trim(),
+            `上一版章节执行合同未通过质量门禁：${qualityFeedback}`,
+          ].filter(Boolean).join("\n"),
+        }
+        : params.promptInput;
       const generated = await runStructuredPrompt({
-        asset: volumeChapterTaskSheetPrompt,
-        promptInput: params.promptInput,
-        contextBlocks: buildVolumeChapterDetailContextBlocks(params.promptInput),
+        asset: volumeChapterExecutionContractPrompt,
+        promptInput,
+        contextBlocks: buildVolumeChapterDetailContextBlocks(promptInput),
         options: {
           provider: params.options.provider,
           model: params.options.model,
           temperature: params.options.temperature ?? 0.35,
+          taskId: params.options.taskId,
+          entrypoint: params.options.entrypoint,
+          novelId: promptInput.workspace.novelId,
+          volumeId: promptInput.targetVolume.id,
+          chapterId: promptInput.targetChapter.id,
+          stage: "chapter_execution_contract",
+          itemKey: "chapter_detail_bundle",
+          scope: "chapter_detail",
+          triggerReason: "chapter_detail_generation",
+          signal: params.options.signal,
         },
       });
       const scenePlan = normalizeChapterScenePlan(
         generated.output.sceneCards,
-        params.promptInput.targetChapter.targetWordCount,
+        generated.output.targetWordCount ?? promptInput.targetChapter.targetWordCount,
       );
+      await qualityGate.assertCanEnterExecution({
+        novelId: promptInput.workspace.novelId,
+        volumeId: promptInput.targetVolume.id,
+        chapterId: promptInput.targetChapter.id,
+        chapterOrder: promptInput.targetChapter.chapterOrder,
+        title: promptInput.targetChapter.title,
+        summary: promptInput.targetChapter.summary,
+        purpose: generated.output.purpose,
+        exclusiveEvent: generated.output.exclusiveEvent,
+        endingState: generated.output.endingState,
+        nextChapterEntryState: generated.output.nextChapterEntryState,
+        conflictLevel: generated.output.conflictLevel,
+        revealLevel: generated.output.revealLevel,
+        targetWordCount: generated.output.targetWordCount,
+        mustAvoid: generated.output.mustAvoid,
+        payoffRefs: generated.output.payoffRefs,
+        taskSheet: generated.output.taskSheet,
+        sceneCards: serializeChapterScenePlan(scenePlan),
+      }, {
+        mode: params.options.chapterTaskSheetQualityMode,
+        provider: params.options.provider,
+        model: params.options.model,
+        taskId: params.options.taskId,
+        entrypoint: params.options.entrypoint,
+        signal: params.options.signal,
+      });
       return {
+        purpose: generated.output.purpose.trim(),
+        exclusiveEvent: generated.output.exclusiveEvent.trim(),
+        endingState: generated.output.endingState.trim(),
+        nextChapterEntryState: generated.output.nextChapterEntryState.trim(),
+        conflictLevel: generated.output.conflictLevel,
+        revealLevel: generated.output.revealLevel,
+        targetWordCount: generated.output.targetWordCount,
+        mustAvoid: generated.output.mustAvoid.trim(),
+        payoffRefs: generated.output.payoffRefs,
         taskSheet: generated.output.taskSheet.trim(),
         sceneCards: serializeChapterScenePlan(scenePlan),
       };
     } catch (error) {
       lastError = error instanceof Error ? error : new Error("章节执行合同生成失败。");
+      if (error instanceof ChapterTaskSheetQualityGateError) {
+        qualityFeedback = error.message;
+      }
     }
   }
 

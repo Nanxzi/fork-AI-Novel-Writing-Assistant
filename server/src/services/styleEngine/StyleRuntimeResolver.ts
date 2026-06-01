@@ -1,12 +1,30 @@
-import type { AntiAiRule, ResolvedStyleContext, StyleProfile } from "@ai-novel/shared/types/styleEngine";
+import type { AntiAiRule, ResolvedStyleContext, StyleBinding, StyleProfile } from "@ai-novel/shared/types/styleEngine";
+import { AntiAiPolicyResolver } from "./AntiAiPolicyResolver";
 import { StyleBindingService } from "./StyleBindingService";
 import { StyleCompiler } from "./StyleCompiler";
 import { StyleProfileService } from "./StyleProfileService";
+
+function buildDirectTaskBinding(profile: StyleProfile): StyleBinding {
+  const timestamp = new Date().toISOString();
+  return {
+    id: `task_${profile.id}`,
+    styleProfileId: profile.id,
+    targetType: "task",
+    targetId: profile.id,
+    priority: 999,
+    weight: 1,
+    enabled: true,
+    styleProfile: profile,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+}
 
 export class StyleRuntimeResolver {
   private readonly bindingService = new StyleBindingService();
   private readonly profileService = new StyleProfileService();
   private readonly compiler = new StyleCompiler();
+  private readonly antiAiPolicyResolver = new AntiAiPolicyResolver();
 
   async resolve(input: {
     styleProfileId?: string;
@@ -19,23 +37,50 @@ export class StyleRuntimeResolver {
       if (!profile) {
         throw new Error("写法资产不存在。");
       }
+
+      const matchedBindings = [buildDirectTaskBinding(profile)];
+      const antiAiPolicy = await this.antiAiPolicyResolver.resolveFromBindings({
+        matchedBindings,
+        effectiveStyleProfileId: profile.id,
+      });
+      const baselineRules = antiAiPolicy.globalBaselineRules.map((item) => item.rule);
+      const styleSpecificRules = antiAiPolicy.styleSpecificRules.map((item) => item.rule);
+      const antiAiRules = antiAiPolicy.effectiveRules.map((item) => item.rule);
+      const compiledBlocks = this.compiler.compile({
+        styleProfile: profile,
+        antiAiRules,
+        weight: 1,
+        appliedRuleIds: antiAiRules.map((rule) => rule.id),
+        bindingSummaries: [{
+          styleProfileId: profile.id,
+          styleProfileName: profile.name,
+          targetType: "task",
+          priority: 999,
+          weight: 1,
+        }],
+        effectiveStyleProfileId: profile.id,
+        taskStyleProfileId: input.taskStyleProfileId?.trim() || input.styleProfileId.trim(),
+        activeSourceTargets: ["task"],
+        activeSourceLabels: baselineRules.length > 0 ? ["TASK", "GLOBAL_BASELINE"] : ["TASK"],
+        usesGlobalAntiAiBaseline: baselineRules.length > 0,
+        globalAntiAiRuleIds: baselineRules.map((rule) => rule.id),
+        styleAntiAiRuleIds: styleSpecificRules.map((rule) => rule.id),
+      });
+
       return {
         context: {
-          matchedBindings: [],
-          compiledBlocks: this.compiler.compile({
-            styleProfile: profile,
-            antiAiRules: profile.antiAiRules,
-            weight: 1,
-            bindingSummaries: [{
-              styleProfileId: profile.id,
-              styleProfileName: profile.name,
-              targetType: "task",
-              priority: 999,
-              weight: 1,
-            }],
-          }),
+          matchedBindings,
+          compiledBlocks,
+          effectiveStyleProfileId: profile.id,
+          taskStyleProfileId: input.taskStyleProfileId?.trim() || input.styleProfileId.trim(),
+          activeSourceTargets: ["task"],
+          activeSourceLabels: baselineRules.length > 0 ? ["TASK", "GLOBAL_BASELINE"] : ["TASK"],
+          maturity: compiledBlocks.contract.meta.maturity,
+          usesGlobalAntiAiBaseline: baselineRules.length > 0,
+          globalAntiAiRuleIds: baselineRules.map((rule) => rule.id),
+          styleAntiAiRuleIds: styleSpecificRules.map((rule) => rule.id),
         },
-        antiAiRules: profile.antiAiRules,
+        antiAiRules,
         primaryProfile: profile,
       };
     }
@@ -45,6 +90,14 @@ export class StyleRuntimeResolver {
         context: {
           matchedBindings: [],
           compiledBlocks: null,
+          effectiveStyleProfileId: null,
+          taskStyleProfileId: input.taskStyleProfileId?.trim() || null,
+          activeSourceTargets: [],
+          activeSourceLabels: [],
+          maturity: "summary_only",
+          usesGlobalAntiAiBaseline: false,
+          globalAntiAiRuleIds: [],
+          styleAntiAiRuleIds: [],
         },
         antiAiRules: [],
         primaryProfile: null,
@@ -57,10 +110,14 @@ export class StyleRuntimeResolver {
       taskStyleProfileId: input.taskStyleProfileId,
     });
     const primaryProfile = context.matchedBindings[0]?.styleProfile ?? null;
-    const antiAiRules = context.matchedBindings.flatMap((binding) => binding.styleProfile?.antiAiRules ?? []);
+    const antiAiPolicy = await this.antiAiPolicyResolver.resolveFromBindings({
+      matchedBindings: context.matchedBindings,
+      effectiveStyleProfileId: context.effectiveStyleProfileId,
+    });
+
     return {
       context,
-      antiAiRules,
+      antiAiRules: antiAiPolicy.effectiveRules.map((item) => item.rule),
       primaryProfile,
     };
   }

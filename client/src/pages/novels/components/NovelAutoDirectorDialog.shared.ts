@@ -9,14 +9,19 @@ export const RUN_MODE_OPTIONS: Array<{
   description: string;
 }> = [
   {
+    value: "full_book_autopilot",
+    label: "全书自动成书",
+    description: "你只在开始选择方向，系统会按整本书目标完成规划、写作、审校和修复。",
+  },
+  {
     value: "auto_to_ready",
-    label: "自动推进到可开写",
+    label: "先准备到可开写（推荐）",
     description: "AI 会持续推进到章节执行资源准备好后再交给你。",
   },
   {
     value: "auto_to_execution",
-    label: "继续自动执行章节批次",
-    description: "默认执行前 10 章，也可以改成指定章节范围或按卷执行。",
+    label: "按范围执行",
+    description: "可选择全书、前 N 章或前 1 卷，让 AI 直接准备并执行目标范围。",
   },
 ];
 
@@ -43,6 +48,9 @@ export function buildAutoDirectorRequestPayload(
   llm: AutoDirectorRequestLlmOptions,
   runMode: DirectorRunMode,
   workflowTaskId?: string,
+  options?: {
+    styleProfileId?: string;
+  },
 ) {
   const commercialTags = normalizeCommercialTags(basicForm.commercialTagsText);
   return {
@@ -61,11 +69,14 @@ export function buildAutoDirectorRequestPayload(
     worldId: basicForm.worldId || undefined,
     writingMode: basicForm.writingMode,
     projectMode: basicForm.projectMode,
+    readerChannelPreference: basicForm.readerChannelPreference,
     narrativePov: basicForm.narrativePov,
     pacePreference: basicForm.pacePreference,
     styleTone: basicForm.styleTone.trim() || undefined,
+    styleProfileId: options?.styleProfileId?.trim() || undefined,
     emotionIntensity: basicForm.emotionIntensity,
     aiFreedom: basicForm.aiFreedom,
+    postGenerationStyleReviewEnabled: basicForm.postGenerationStyleReviewEnabled,
     defaultChapterLength: basicForm.defaultChapterLength,
     estimatedChapterCount: basicForm.estimatedChapterCount,
     projectStatus: basicForm.projectStatus,

@@ -1,9 +1,17 @@
 import type { ApiResponse } from "@ai-novel/shared/types/api";
+import type {
+  DirectorAutoApprovalPreferenceSettings,
+} from "@ai-novel/shared/types/autoDirectorApproval";
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
-import type { ModelRouteConfig, ModelRouteTaskType } from "@ai-novel/shared/types/novel";
+import type {
+  ModelRouteConfig,
+  ModelRouteRequestProtocol,
+  ModelRouteStructuredResponseFormat,
+  ModelRouteTaskType,
+} from "@ai-novel/shared/types/novel";
 import { apiClient } from "./client";
 
-export type EmbeddingProvider = Extract<LLMProvider, "openai" | "siliconflow">;
+export type EmbeddingProvider = LLMProvider;
 
 export interface APIKeyStatus {
   provider: LLMProvider;
@@ -11,14 +19,20 @@ export interface APIKeyStatus {
   name: string;
   displayName?: string;
   currentModel: string;
+  currentImageModel: string | null;
   currentBaseURL: string;
   models: string[];
+  imageModels: string[];
   defaultModel: string;
+  defaultImageModel: string | null;
   defaultBaseURL: string;
   requiresApiKey: boolean;
   isConfigured: boolean;
   isActive: boolean;
   reasoningEnabled: boolean;
+  concurrencyLimit: number;
+  requestIntervalMs: number;
+  supportsImageGeneration: boolean;
 }
 
 export type ProviderBalanceStatusKind = "available" | "missing_api_key" | "unsupported" | "error";
@@ -71,9 +85,37 @@ export interface RagSettingsStatus {
   embeddingTimeoutMs: number;
   embeddingMaxRetries: number;
   embeddingRetryBaseMs: number;
+  enabled: boolean;
+  qdrantUrl: string;
+  qdrantApiKeyConfigured: boolean;
+  qdrantTimeoutMs: number;
+  qdrantUpsertMaxBytes: number;
+  chunkSize: number;
+  chunkOverlap: number;
+  vectorCandidates: number;
+  keywordCandidates: number;
+  finalTopK: number;
+  workerPollMs: number;
+  workerMaxAttempts: number;
+  workerRetryBaseMs: number;
+  httpTimeoutMs: number;
   suggestedCollectionName: string;
   reindexQueuedCount?: number;
   providers: RagProviderStatus[];
+}
+
+export interface StyleEngineRuntimeSettingsStatus {
+  styleExtractionTimeoutMs: number;
+  defaultStyleExtractionTimeoutMs: number;
+  minStyleExtractionTimeoutMs: number;
+  maxStyleExtractionTimeoutMs: number;
+}
+
+export interface LLMSelectionSettings {
+  provider: LLMProvider;
+  model: string;
+  temperature: number;
+  maxTokens?: number;
 }
 
 export interface ModelRoutesResponse {
@@ -84,6 +126,8 @@ export interface ModelRoutesResponse {
     model: string;
     temperature: number;
     maxTokens: number | null;
+    requestProtocol: ModelRouteRequestProtocol;
+    structuredResponseFormat: ModelRouteStructuredResponseFormat;
   }>;
 }
 
@@ -94,15 +138,18 @@ export interface ModelRouteConnectivityStatus {
   ok: boolean;
   latency: number | null;
   error: string | null;
+  requestProtocol: ModelRouteRequestProtocol | null;
   plain: {
     ok: boolean;
     latency: number | null;
     error: string | null;
+    requestProtocol: ModelRouteRequestProtocol | null;
   } | null;
   structured: {
     ok: boolean;
     latency: number | null;
     error: string | null;
+    requestProtocol: ModelRouteRequestProtocol | null;
     strategy: string | null;
     reasoningForcedOff: boolean;
     fallbackAvailable: boolean;
@@ -125,6 +172,19 @@ export interface StructuredFallbackSettings {
   model: string;
   temperature: number;
   maxTokens: number | null;
+}
+
+export interface AutoDirectorChannelConfig {
+  webhookUrl: string;
+  callbackToken: string;
+  operatorMapJson: string;
+  eventTypes: string[];
+}
+
+export interface AutoDirectorChannelSettings {
+  baseUrl: string;
+  dingtalk: AutoDirectorChannelConfig;
+  wecom: AutoDirectorChannelConfig;
 }
 
 export async function getAPIKeySettings() {
@@ -158,6 +218,21 @@ export async function saveRagSettings(payload: {
   embeddingTimeoutMs: number;
   embeddingMaxRetries: number;
   embeddingRetryBaseMs: number;
+  enabled: boolean;
+  qdrantUrl: string;
+  qdrantApiKey?: string;
+  clearQdrantApiKey?: boolean;
+  qdrantTimeoutMs: number;
+  qdrantUpsertMaxBytes: number;
+  chunkSize: number;
+  chunkOverlap: number;
+  vectorCandidates: number;
+  keywordCandidates: number;
+  finalTopK: number;
+  workerPollMs: number;
+  workerMaxAttempts: number;
+  workerRetryBaseMs: number;
+  httpTimeoutMs: number;
 }) {
   const { data } = await apiClient.put<
     ApiResponse<
@@ -174,6 +249,20 @@ export async function saveRagSettings(payload: {
         | "embeddingTimeoutMs"
         | "embeddingMaxRetries"
         | "embeddingRetryBaseMs"
+        | "enabled"
+        | "qdrantUrl"
+        | "qdrantApiKeyConfigured"
+        | "qdrantTimeoutMs"
+        | "qdrantUpsertMaxBytes"
+        | "chunkSize"
+        | "chunkOverlap"
+        | "vectorCandidates"
+        | "keywordCandidates"
+        | "finalTopK"
+        | "workerPollMs"
+        | "workerMaxAttempts"
+        | "workerRetryBaseMs"
+        | "httpTimeoutMs"
         | "suggestedCollectionName"
         | "reindexQueuedCount"
       >
@@ -183,7 +272,34 @@ export async function saveRagSettings(payload: {
 }
 
 export async function getRagEmbeddingModels(provider: EmbeddingProvider) {
-  const { data } = await apiClient.get<ApiResponse<RagEmbeddingModelStatus>>(`/settings/rag/models/${provider}`);
+  const { data } = await apiClient.get<ApiResponse<RagEmbeddingModelStatus>>(
+    `/settings/rag/models/${encodeURIComponent(provider)}`,
+  );
+  return data;
+}
+
+export async function getStyleEngineRuntimeSettings() {
+  const { data } = await apiClient.get<ApiResponse<StyleEngineRuntimeSettingsStatus>>("/settings/style-engine-runtime");
+  return data;
+}
+
+export async function getLLMSelectionSetting() {
+  const { data } = await apiClient.get<ApiResponse<LLMSelectionSettings | null>>("/settings/llm-selection");
+  return data;
+}
+
+export async function saveLLMSelectionSetting(payload: LLMSelectionSettings) {
+  const { data } = await apiClient.put<ApiResponse<LLMSelectionSettings>>("/settings/llm-selection", payload);
+  return data;
+}
+
+export async function saveStyleEngineRuntimeSettings(payload: {
+  styleExtractionTimeoutMs: number;
+}) {
+  const { data } = await apiClient.put<ApiResponse<StyleEngineRuntimeSettingsStatus>>(
+    "/settings/style-engine-runtime",
+    payload,
+  );
   return data;
 }
 
@@ -193,9 +309,12 @@ export async function saveAPIKeySetting(
     displayName?: string;
     key?: string;
     model?: string;
+    imageModel?: string;
     baseURL?: string;
     isActive?: boolean;
     reasoningEnabled?: boolean;
+    concurrencyLimit?: number;
+    requestIntervalMs?: number;
   },
 ) {
   const { data } = await apiClient.put<
@@ -203,10 +322,15 @@ export async function saveAPIKeySetting(
       provider: string;
       displayName: string | null;
       model: string | null;
+      imageModel: string | null;
       baseURL: string | null;
       isActive: boolean;
       reasoningEnabled: boolean;
+      concurrencyLimit: number;
+      requestIntervalMs: number;
       models: string[];
+      imageModels: string[];
+      supportsImageGeneration: boolean;
     }>
   >(`/settings/api-keys/${provider}`, payload);
   return data;
@@ -215,22 +339,43 @@ export async function saveAPIKeySetting(
 export async function createCustomProvider(payload: {
   name: string;
   key?: string;
-  model: string;
+  model?: string;
+  imageModel?: string;
   baseURL: string;
   isActive?: boolean;
   reasoningEnabled?: boolean;
+  concurrencyLimit?: number;
+  requestIntervalMs?: number;
 }) {
   const { data } = await apiClient.post<
     ApiResponse<{
       provider: string;
       displayName: string | null;
       model: string | null;
+      imageModel: string | null;
       baseURL: string | null;
       isActive: boolean;
       reasoningEnabled: boolean;
+      concurrencyLimit: number;
+      requestIntervalMs: number;
       models: string[];
+      imageModels: string[];
+      supportsImageGeneration: boolean;
     }>
   >("/settings/custom-providers", payload);
+  return data;
+}
+
+export async function previewCustomProviderModels(payload: {
+  key?: string;
+  baseURL: string;
+}) {
+  const { data } = await apiClient.post<
+    ApiResponse<{
+      models: string[];
+      defaultModel: string;
+    }>
+  >("/settings/custom-providers/models", payload);
   return data;
 }
 
@@ -277,6 +422,33 @@ export async function getStructuredFallbackConfig() {
 
 export async function saveStructuredFallbackConfig(payload: Partial<StructuredFallbackSettings>) {
   const { data } = await apiClient.put<ApiResponse<StructuredFallbackSettings>>("/llm/structured-fallback", payload);
+  return data;
+}
+
+export async function getAutoDirectorChannelSettings() {
+  const { data } = await apiClient.get<ApiResponse<AutoDirectorChannelSettings>>("/settings/auto-director/channels");
+  return data;
+}
+
+export async function saveAutoDirectorChannelSettings(payload: Partial<AutoDirectorChannelSettings>) {
+  const { data } = await apiClient.put<ApiResponse<AutoDirectorChannelSettings>>("/settings/auto-director/channels", payload);
+  return data;
+}
+
+export async function getAutoDirectorApprovalPreferenceSettings() {
+  const { data } = await apiClient.get<ApiResponse<DirectorAutoApprovalPreferenceSettings>>(
+    "/settings/auto-director/approval-preferences",
+  );
+  return data;
+}
+
+export async function saveAutoDirectorApprovalPreferenceSettings(payload: {
+  approvalPointCodes: string[];
+}) {
+  const { data } = await apiClient.put<ApiResponse<DirectorAutoApprovalPreferenceSettings>>(
+    "/settings/auto-director/approval-preferences",
+    payload,
+  );
   return data;
 }
 

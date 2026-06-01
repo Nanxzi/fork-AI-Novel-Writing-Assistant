@@ -3,6 +3,7 @@ import type {
   CharacterCastOption,
   CharacterCastOptionClearResult,
   CharacterCastOptionDeleteResult,
+  CharacterCastQualityAssessment,
   CharacterCastRole,
   CharacterRelation,
   SupplementalCharacterApplyResult,
@@ -22,13 +23,20 @@ import {
 import type { CharacterCastOptionResponseParsed } from "../../../prompting/prompts/novel/characterPreparation.promptSchemas";
 import { buildStoryModePromptBlock, normalizeStoryModeOutput } from "../../storyMode/storyModeProfile";
 import { NovelContextService } from "../NovelContextService";
+import {
+  CharacterVisibleProfileService,
+  type CharacterVisibleProfileGenerateOptions,
+} from "../characterProfile/CharacterVisibleProfileService";
 import { CharacterDynamicsService } from "../dynamics/CharacterDynamicsService";
 import { CharacterPreparationSupplementalService } from "./characterPreparationSupplemental";
+import {
+  parseCharacterProhibitionsJson,
+  serializeCharacterProhibitions,
+} from "../characters/characterHardFacts";
 import {
   assessCharacterCastBatch,
   buildCharacterCastBlockedMessage,
   buildCharacterCastRepairReasons,
-  shouldNormalizeCharacterCastLanguage,
   type CharacterCastBatchAssessment,
 } from "./characterCastQuality";
 
@@ -39,9 +47,22 @@ interface CharacterPrepOptions {
   storyInput?: string;
 }
 
+interface CharacterCastApplyOptions {
+  overrideQualityGate?: boolean;
+  visibleProfileGeneration?: CharacterVisibleProfileGenerateOptions;
+  postApplyMode?: "sync" | "background";
+}
+
 function toOptionalText(value: string | null | undefined): string | null {
   const normalized = value?.trim() ?? "";
   return normalized || null;
+}
+
+function fillIfMissing(existing: string | null | undefined, incoming: string | null | undefined): string | undefined {
+  if (existing?.trim()) {
+    return undefined;
+  }
+  return toOptionalText(incoming) ?? undefined;
 }
 
 function buildWorldStage(novel: {
@@ -88,6 +109,17 @@ function serializeCharacterCastOption(row: {
     relationToProtagonist: string | null;
     storyFunction: string;
     shortDescription: string | null;
+    personality: string | null;
+    background: string | null;
+    development: string | null;
+    identityLabel: string | null;
+    factionLabel: string | null;
+    stanceLabel: string | null;
+    powerLevel: string | null;
+    realm: string | null;
+    currentLocation: string | null;
+    availability: string | null;
+    prohibitionsJson: string;
     outerGoal: string | null;
     innerNeed: string | null;
     fear: string | null;
@@ -135,6 +167,18 @@ function serializeCharacterCastOption(row: {
       relationToProtagonist: member.relationToProtagonist,
       storyFunction: member.storyFunction,
       shortDescription: member.shortDescription,
+      personality: member.personality,
+      background: member.background,
+      development: member.development,
+      identityLabel: member.identityLabel,
+      factionLabel: member.factionLabel,
+      stanceLabel: member.stanceLabel,
+      powerLevel: member.powerLevel,
+      realm: member.realm,
+      currentLocation: member.currentLocation,
+      availability: member.availability,
+      prohibitions: parseCharacterProhibitionsJson(member.prohibitionsJson),
+      prohibitionsJson: member.prohibitionsJson,
       outerGoal: member.outerGoal,
       innerNeed: member.innerNeed,
       fear: member.fear,
@@ -166,9 +210,30 @@ function serializeCharacterCastOption(row: {
   };
 }
 
+function buildCastOptionQualityAssessment(option: CharacterCastOption): CharacterCastQualityAssessment {
+  const assessment = assessCharacterCastBatch([option], option.sourceStoryInput ?? "");
+  const optionAssessment = assessment.options[0];
+  return {
+    autoApplicable: optionAssessment?.autoApplicable ?? true,
+    blockingReasons: assessment.blockingReasons,
+    issues: optionAssessment?.issues ?? [],
+  };
+}
+
+function serializeCharacterCastOptionWithQuality(
+  row: Parameters<typeof serializeCharacterCastOption>[0],
+): CharacterCastOption {
+  const option = serializeCharacterCastOption(row);
+  return {
+    ...option,
+    qualityAssessment: buildCastOptionQualityAssessment(option),
+  };
+}
+
 export class CharacterPreparationService {
   private readonly novelContextService = new NovelContextService();
   private readonly characterDynamicsService = new CharacterDynamicsService();
+  private readonly characterVisibleProfileService = new CharacterVisibleProfileService();
   private readonly supplementalService = new CharacterPreparationSupplementalService(
     this.novelContextService,
     this.characterDynamicsService,
@@ -287,6 +352,45 @@ export class CharacterPreparationService {
     };
   }
 
+  private async runPostApplyEnhancements(input: {
+    novelId: string;
+    optionId: string;
+    characterIds: string[];
+    visibleProfileGeneration?: CharacterVisibleProfileGenerateOptions;
+  }): Promise<void> {
+    const logContext = {
+      novelId: input.novelId,
+      optionId: input.optionId,
+      characterIds: input.characterIds,
+    };
+
+    try {
+      await this.characterDynamicsService.rebuildDynamics(input.novelId, {
+        sourceType: "cast_option_projection",
+      });
+    } catch (error) {
+      console.warn("[character-cast-apply] 角色动态投影后台补齐失败", {
+        ...logContext,
+        stage: "character_dynamics",
+        error,
+      });
+    }
+
+    try {
+      await this.characterVisibleProfileService.autoCompleteVisibleProfilesForCharacters(
+        input.novelId,
+        input.characterIds,
+        input.visibleProfileGeneration,
+      );
+    } catch (error) {
+      console.warn("[character-cast-apply] 外显资料后台补齐失败", {
+        ...logContext,
+        stage: "visible_profile",
+        error,
+      });
+    }
+  }
+
   private async normalizeCharacterCastOptions(
     parsed: CharacterCastOptionResponseParsed,
     options: CharacterPrepOptions,
@@ -353,6 +457,17 @@ export class CharacterPreparationService {
                 relationToProtagonist: toOptionalText(member.relationToProtagonist),
                 storyFunction: member.storyFunction,
                 shortDescription: toOptionalText(member.shortDescription),
+                personality: toOptionalText(member.personality),
+                background: toOptionalText(member.background),
+                development: toOptionalText(member.development),
+                identityLabel: toOptionalText(member.identityLabel),
+                factionLabel: toOptionalText(member.factionLabel),
+                stanceLabel: toOptionalText(member.stanceLabel),
+                powerLevel: toOptionalText(member.powerLevel),
+                realm: toOptionalText(member.realm),
+                currentLocation: toOptionalText(member.currentLocation),
+                availability: toOptionalText(member.availability),
+                prohibitionsJson: serializeCharacterProhibitions(member.prohibitions),
                 outerGoal: toOptionalText(member.outerGoal),
                 innerNeed: toOptionalText(member.innerNeed),
                 fear: toOptionalText(member.fear),
@@ -400,7 +515,7 @@ export class CharacterPreparationService {
         { updatedAt: "desc" },
         { createdAt: "desc" },
       ],
-    }).then((rows) => rows.map((row) => serializeCharacterCastOption(row)));
+    }).then((rows) => rows.map((row) => serializeCharacterCastOptionWithQuality(row)));
   }
 
   async listCharacterRelations(novelId: string): Promise<CharacterRelation[]> {
@@ -465,9 +580,6 @@ export class CharacterPreparationService {
     });
 
     let parsed = generation.output;
-    if (shouldNormalizeCharacterCastLanguage(parsed.options)) {
-      parsed = await this.normalizeCharacterCastOptions(parsed, options).catch(() => parsed);
-    }
 
     let assessment = assessCharacterCastBatch(parsed.options, context.storyInput);
     if (assessment.autoApplicableOptionIndex === null) {
@@ -477,9 +589,6 @@ export class CharacterPreparationService {
         contextBlocks: context.contextBlocks,
         options,
       }).catch(() => parsed);
-      if (shouldNormalizeCharacterCastLanguage(parsed.options)) {
-        parsed = await this.normalizeCharacterCastOptions(parsed, options).catch(() => parsed);
-      }
       assessment = assessCharacterCastBatch(parsed.options, context.storyInput);
     }
 
@@ -490,6 +599,7 @@ export class CharacterPreparationService {
   async applyCharacterCastOption(
     novelId: string,
     optionId: string,
+    options: CharacterCastApplyOptions = {},
   ): Promise<CharacterCastApplyResult> {
     const option = await prisma.characterCastOption.findFirst({
       where: { id: optionId, novelId },
@@ -503,19 +613,29 @@ export class CharacterPreparationService {
       throw new Error("Character cast option not found.");
     }
 
-    const assessment = assessCharacterCastBatch([
-      {
-        ...serializeCharacterCastOption(option),
-        id: option.id,
-      },
-    ], option.sourceStoryInput ?? "");
-    if (assessment.autoApplicableOptionIndex === null) {
+    const assessment = assessCharacterCastBatch([serializeCharacterCastOption(option)], option.sourceStoryInput ?? "");
+    const hasQualityRisk = assessment.autoApplicableOptionIndex === null;
+    if (hasQualityRisk && !options.overrideQualityGate) {
       throw new Error(buildCharacterCastBlockedMessage(assessment));
     }
 
     const existingCharacters = await prisma.character.findMany({
       where: { novelId },
-      select: { id: true, name: true },
+      select: {
+        id: true,
+        name: true,
+        personality: true,
+        background: true,
+        development: true,
+        identityLabel: true,
+        factionLabel: true,
+        stanceLabel: true,
+        powerLevel: true,
+        realm: true,
+        currentLocation: true,
+        availability: true,
+        prohibitionsJson: true,
+      },
       orderBy: { createdAt: "asc" },
     });
 
@@ -535,6 +655,19 @@ export class CharacterPreparationService {
           castRole: member.castRole,
           storyFunction: member.storyFunction,
           relationToProtagonist: member.relationToProtagonist ?? undefined,
+          personality: fillIfMissing(matched.personality, member.personality),
+          background: fillIfMissing(matched.background, member.background),
+          development: fillIfMissing(matched.development, member.development),
+          identityLabel: fillIfMissing(matched.identityLabel, member.identityLabel),
+          factionLabel: fillIfMissing(matched.factionLabel, member.factionLabel),
+          stanceLabel: fillIfMissing(matched.stanceLabel, member.stanceLabel),
+          powerLevel: fillIfMissing(matched.powerLevel, member.powerLevel),
+          realm: fillIfMissing(matched.realm, member.realm),
+          currentLocation: fillIfMissing(matched.currentLocation, member.currentLocation),
+          availability: fillIfMissing(matched.availability, member.availability),
+          prohibitions: parseCharacterProhibitionsJson(matched.prohibitionsJson).length === 0
+            ? parseCharacterProhibitionsJson(member.prohibitionsJson)
+            : undefined,
           outerGoal: member.outerGoal ?? undefined,
           innerNeed: member.innerNeed ?? undefined,
           fear: member.fear ?? undefined,
@@ -557,6 +690,17 @@ export class CharacterPreparationService {
         castRole: member.castRole,
         storyFunction: member.storyFunction,
         relationToProtagonist: member.relationToProtagonist ?? undefined,
+        personality: member.personality ?? undefined,
+        background: member.background ?? undefined,
+        development: member.development ?? undefined,
+        identityLabel: member.identityLabel ?? undefined,
+        factionLabel: member.factionLabel ?? undefined,
+        stanceLabel: member.stanceLabel ?? undefined,
+        powerLevel: member.powerLevel ?? undefined,
+        realm: member.realm ?? undefined,
+        currentLocation: member.currentLocation ?? undefined,
+        availability: member.availability ?? undefined,
+        prohibitions: parseCharacterProhibitionsJson(member.prohibitionsJson),
         outerGoal: member.outerGoal ?? undefined,
         innerNeed: member.innerNeed ?? undefined,
         fear: member.fear ?? undefined,
@@ -623,9 +767,25 @@ export class CharacterPreparationService {
       data: { status: "applied" },
     });
 
-    await this.characterDynamicsService.rebuildDynamics(novelId, {
-      sourceType: "cast_option_projection",
-    }).catch(() => null);
+    const postApplyInput = {
+      novelId,
+      optionId: option.id,
+      characterIds: uniqueCharacterIds,
+      visibleProfileGeneration: options.visibleProfileGeneration,
+    };
+    if (options.postApplyMode === "background") {
+      void this.runPostApplyEnhancements(postApplyInput).catch((error) => {
+        console.warn("[character-cast-apply] 阵容应用后台补齐任务失败", {
+          novelId,
+          optionId: option.id,
+          characterIds: uniqueCharacterIds,
+          stage: "post_apply_enhancements",
+          error,
+        });
+      });
+    } else {
+      await this.runPostApplyEnhancements(postApplyInput);
+    }
 
     return {
       optionId: option.id,
@@ -634,6 +794,8 @@ export class CharacterPreparationService {
       relationCount: relationRows.length,
       characterIds: uniqueCharacterIds,
       primaryCharacterId: characterIdByName.get(option.members[0]?.name ?? "") ?? null,
+      qualityOverrideApplied: hasQualityRisk && Boolean(options.overrideQualityGate),
+      qualityWarnings: assessment.blockingReasons,
     };
   }
 

@@ -3,8 +3,9 @@ const assert = require("node:assert/strict");
 
 const {
   resolveDirectorAutoExecutionWorkflowState,
-} = require("../dist/services/novel/director/novelDirectorAutoExecution.js");
+} = require("../dist/services/novel/director/automation/novelDirectorAutoExecution.js");
 const {
+  parsePipelinePayload,
   stringifyPipelinePayload,
 } = require("../dist/services/novel/pipelineJobState.js");
 
@@ -50,4 +51,35 @@ test("resolveDirectorAutoExecutionWorkflowState appends background sync labels t
   assert.equal(state.stage, "chapter_execution");
   assert.match(state.itemLabel, /角色成长中\(第2章\)/);
   assert.match(state.itemLabel, /状态同步中\(第2章\)/);
+});
+test("pipeline payload preserves full-book autopilot control policy", () => {
+  const payload = stringifyPipelinePayload({
+    provider: "deepseek",
+    model: "deepseek-v4-flash",
+    taskStyleProfileId: "style-1",
+    controlPolicy: {
+      kickoffMode: "director_start",
+      advanceMode: "full_book_autopilot",
+      reviewCheckpoints: ["chapter_batch"],
+      autoExecutionRange: {
+        mode: "book",
+        start: null,
+        end: null,
+      },
+    },
+  });
+
+  const parsed = parsePipelinePayload(payload);
+
+  assert.equal(parsed.taskStyleProfileId, "style-1");
+  assert.deepEqual(parsed.controlPolicy, {
+    kickoffMode: "director_start",
+    advanceMode: "full_book_autopilot",
+    reviewCheckpoints: ["chapter_batch"],
+    autoExecutionRange: {
+      mode: "book",
+      start: null,
+      end: null,
+    },
+  });
 });

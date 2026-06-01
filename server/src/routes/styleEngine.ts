@@ -4,6 +4,7 @@ import { z } from "zod";
 import { llmProviderSchema } from "../llm/providerSchema";
 import { authMiddleware } from "../middleware/auth";
 import { validate } from "../middleware/validate";
+import { AntiAiPolicyResolver } from "../services/styleEngine/AntiAiPolicyResolver";
 import { AntiAiRuleService } from "../services/styleEngine/AntiAiRuleService";
 import { StyleBindingService } from "../services/styleEngine/StyleBindingService";
 import { StyleDetectionService } from "../services/styleEngine/StyleDetectionService";
@@ -15,6 +16,7 @@ import { StyleRewriteService } from "../services/styleEngine/StyleRewriteService
 const router = Router();
 const styleProfileService = new StyleProfileService();
 const antiAiRuleService = new AntiAiRuleService();
+const antiAiPolicyResolver = new AntiAiPolicyResolver();
 const styleBindingService = new StyleBindingService();
 const styleDetectionService = new StyleDetectionService();
 const styleRewriteService = new StyleRewriteService();
@@ -30,7 +32,7 @@ const manualProfileSchema = z.object({
   category: z.string().trim().optional(),
   tags: z.array(z.string().trim()).optional(),
   applicableGenres: z.array(z.string().trim()).optional(),
-  sourceType: z.enum(["manual", "from_text", "from_book_analysis", "from_current_work"]).optional(),
+  sourceType: z.enum(["manual", "from_text", "from_book_analysis", "from_knowledge_document", "from_current_work"]).optional(),
   sourceRefId: z.string().trim().optional(),
   sourceContent: z.string().optional(),
   extractedFeatures: z.array(z.object({
@@ -44,6 +46,7 @@ const manualProfileSchema = z.object({
     transferability: z.number().min(0).max(1),
     fingerprintRisk: z.number().min(0).max(1),
     enabled: z.boolean(),
+    selectedDecision: z.enum(["keep", "weaken", "remove"]).optional(),
     keepRulePatch: z.record(z.string(), z.unknown()),
     weakenRulePatch: z.record(z.string(), z.unknown()).optional(),
   })).optional(),
@@ -88,12 +91,36 @@ const antiAiRuleSchema = z.object({
   promptInstruction: z.string().trim().optional(),
   autoRewrite: z.boolean().optional(),
   enabled: z.boolean().optional(),
+  globalBaselineEnabled: z.boolean().optional(),
 });
 
 const antiAiRuleUpdateSchema = antiAiRuleSchema.partial().refine(
   (value) => Object.keys(value).length > 0,
   { message: "至少提供一个更新字段。" },
 );
+
+const antiAiRuleDraftFieldsSchema = z.object({
+  key: z.string().trim(),
+  name: z.string().trim(),
+  type: z.enum(["forbidden", "risk", "encourage"]),
+  severity: z.enum(["low", "medium", "high"]),
+  description: z.string().trim(),
+  detectPatterns: z.array(z.string().trim()).default([]),
+  rewriteSuggestion: z.string().trim().nullable().optional(),
+  promptInstruction: z.string().trim().nullable().optional(),
+  autoRewrite: z.boolean(),
+  enabled: z.boolean(),
+  globalBaselineEnabled: z.boolean(),
+});
+
+const antiAiRuleAiDraftSchema = z.object({
+  mode: z.enum(["create", "improve"]),
+  instruction: z.string().trim().min(1),
+  currentRule: antiAiRuleDraftFieldsSchema.optional(),
+  provider: llmProviderSchema.optional(),
+  model: z.string().trim().optional(),
+  temperature: z.number().min(0).max(2).optional(),
+});
 
 const bindingSchema = z.object({
   styleProfileId: z.string().trim().min(1),
@@ -108,6 +135,13 @@ const bindingQuerySchema = z.object({
   targetType: z.enum(["novel", "chapter", "task"]).optional(),
   targetId: z.string().trim().optional(),
   styleProfileId: z.string().trim().optional(),
+});
+
+const effectiveAntiAiRulesQuerySchema = z.object({
+  novelId: z.string().trim().optional(),
+  chapterId: z.string().trim().optional(),
+  styleProfileId: z.string().trim().optional(),
+  taskStyleProfileId: z.string().trim().optional(),
 });
 
 const testWriteSchema = z.object({
@@ -126,6 +160,7 @@ const detectionSchema = z.object({
   novelId: z.string().trim().optional(),
   chapterId: z.string().trim().optional(),
   taskStyleProfileId: z.string().trim().optional(),
+  previewAntiAiRuleIds: z.array(z.string().trim().min(1)).optional(),
   provider: llmProviderSchema.optional(),
   model: z.string().trim().optional(),
   temperature: z.number().min(0).max(2).optional(),
@@ -137,6 +172,7 @@ const rewriteSchema = z.object({
   novelId: z.string().trim().optional(),
   chapterId: z.string().trim().optional(),
   taskStyleProfileId: z.string().trim().optional(),
+  previewAntiAiRuleIds: z.array(z.string().trim().min(1)).optional(),
   issues: z.array(z.object({
     ruleName: z.string().trim().min(1),
     excerpt: z.string().trim().min(1),
@@ -309,6 +345,33 @@ router.get("/anti-ai-rules", async (_req, res, next) => {
       success: true,
       data,
       message: "获取反AI规则成功。",
+    } satisfies ApiResponse<typeof data>);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get("/anti-ai-rules/effective", validate({ query: effectiveAntiAiRulesQuerySchema }), async (req, res, next) => {
+  try {
+    const query = effectiveAntiAiRulesQuerySchema.parse(req.query);
+    const data = await antiAiPolicyResolver.resolveEffectiveRules(query);
+    res.status(200).json({
+      success: true,
+      data,
+      message: "获取生效反 AI 规则成功。",
+    } satisfies ApiResponse<typeof data>);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/anti-ai-rules/ai-draft", validate({ body: antiAiRuleAiDraftSchema }), async (req, res, next) => {
+  try {
+    const data = await antiAiRuleService.generateAiDraft(req.body as z.infer<typeof antiAiRuleAiDraftSchema>);
+    res.status(200).json({
+      success: true,
+      data,
+      message: "反 AI 规则草稿已生成。",
     } satisfies ApiResponse<typeof data>);
   } catch (error) {
     next(error);

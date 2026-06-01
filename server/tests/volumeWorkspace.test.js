@@ -131,6 +131,25 @@ test("legacy volume version blob upgrades to v2 defaults", () => {
   assert.equal(reparsed.readiness.canGenerateStrategy, true);
 });
 
+test("volume workspace document supports an empty cleared outline state", () => {
+  const document = buildVolumeWorkspaceDocument({
+    novelId: "novel-1",
+    volumes: [],
+    strategyPlan: null,
+    critiqueReport: null,
+    beatSheets: [],
+    rebalanceDecisions: [],
+    source: "empty",
+    activeVersionId: null,
+  });
+
+  assert.deepEqual(document.volumes, []);
+  assert.equal(document.strategyPlan, null);
+  assert.deepEqual(document.beatSheets, []);
+  assert.equal(document.readiness.canGenerateSkeleton, false);
+  assert.equal(document.readiness.canGenerateChapterList, false);
+});
+
 test("mergeVolumeWorkspaceInput keeps strategy data but clears downstream assets after volume-level edits", () => {
   const current = buildVolumeWorkspaceDocument({
     novelId: "novel-1",
@@ -175,6 +194,56 @@ test("mergeVolumeWorkspaceInput keeps strategy data but clears downstream assets
 
   assert.equal(merged.volumes[0].title, "第一卷（更新）");
   assert.equal(merged.strategyPlan?.recommendedVolumeCount, 2);
+  assert.deepEqual(merged.beatSheets, []);
+  assert.deepEqual(merged.rebalanceDecisions, []);
+});
+
+test("mergeVolumeWorkspaceInput can clear outline assets for restart takeover", () => {
+  const current = buildVolumeWorkspaceDocument({
+    novelId: "novel-1",
+    volumes: [createBaseVolume()],
+    strategyPlan: {
+      recommendedVolumeCount: 1,
+      hardPlannedVolumeCount: 1,
+      readerRewardLadder: "先压迫后兑现。",
+      escalationLadder: "代价持续升级。",
+      midpointShift: "中盘身份反转。",
+      notes: "先锁当前卷。",
+      volumes: [{
+        sortOrder: 1,
+        planningMode: "hard",
+        roleLabel: "起势卷",
+        coreReward: "主线抓手成立",
+        escalationFocus: "危险升级",
+        uncertaintyLevel: "low",
+      }],
+      uncertainties: [],
+    },
+    beatSheets: [{
+      volumeId: "volume-1",
+      volumeSortOrder: 1,
+      status: "generated",
+      beats: [{
+        key: "opening_hook",
+        label: "开卷抓手",
+        summary: "主角第一次被压制。",
+        chapterSpanHint: "1-2章",
+        mustDeliver: ["压迫感"],
+      }],
+    }],
+  });
+
+  const merged = mergeVolumeWorkspaceInput("novel-1", current, {
+    volumes: [],
+    strategyPlan: null,
+    critiqueReport: null,
+    beatSheets: [],
+    rebalanceDecisions: [],
+  });
+
+  assert.deepEqual(merged.volumes, []);
+  assert.equal(merged.strategyPlan, null);
+  assert.equal(merged.critiqueReport, null);
   assert.deepEqual(merged.beatSheets, []);
   assert.deepEqual(merged.rebalanceDecisions, []);
 });

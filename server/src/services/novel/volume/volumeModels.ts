@@ -1,4 +1,5 @@
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
+import type { ChapterTaskSheetQualityMode } from "@ai-novel/shared/types/chapterTaskSheetQuality";
 import type {
   VolumeChapterListGenerationMode,
   VolumeBeatSheet,
@@ -12,6 +13,7 @@ import type {
   VolumeRebalanceDecision,
   VolumeStrategyPlan,
   VolumePlanVersion,
+  VolumePlanVersionSummary,
 } from "@ai-novel/shared/types/novel";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "../../../db/prisma";
@@ -87,6 +89,11 @@ export interface VolumeGenerateOptions {
   respectExistingVolumeCount?: boolean;
   draftVolumes?: unknown;
   draftWorkspace?: unknown;
+  taskId?: string;
+  entrypoint?: string;
+  chapterTaskSheetQualityMode?: ChapterTaskSheetQualityMode;
+  signal?: AbortSignal;
+  persistIntermediateDocuments?: boolean;
   onPhaseStart?: (event: VolumeGenerationPhaseEvent) => void | Promise<void>;
   onIntermediateDocument?: (event: VolumeIntermediateDocumentEvent) => void | Promise<void>;
 }
@@ -110,6 +117,10 @@ export interface VolumeSyncInput {
   volumes: unknown;
   preserveContent?: boolean;
   applyDeletes?: boolean;
+  executionContractChapterRange?: {
+    startOrder: number;
+    endOrder: number;
+  };
 }
 
 export type DbClient = Prisma.TransactionClient | typeof prisma;
@@ -123,6 +134,17 @@ export type VolumeRow = Prisma.VolumePlanGetPayload<{
 }>;
 
 export type VolumeVersionRow = Prisma.VolumePlanVersionGetPayload<Record<string, never>>;
+export type VolumeVersionSummaryRow = Prisma.VolumePlanVersionGetPayload<{
+  select: {
+    id: true;
+    novelId: true;
+    version: true;
+    status: true;
+    diffSummary: true;
+    createdAt: true;
+    updatedAt: true;
+  };
+}>;
 
 export function mapVolumeRow(row: VolumeRow): VolumePlan {
   return {
@@ -148,6 +170,7 @@ export function mapVolumeRow(row: VolumeRow): VolumePlan {
     chapters: row.chapters.map((chapter) => ({
       id: chapter.id,
       volumeId: chapter.volumeId,
+      chapterId: chapter.chapterId,
       chapterOrder: chapter.chapterOrder,
       beatKey: null,
       title: chapter.title,
@@ -162,6 +185,7 @@ export function mapVolumeRow(row: VolumeRow): VolumePlan {
       mustAvoid: chapter.mustAvoid,
       taskSheet: chapter.taskSheet,
       sceneCards: chapter.sceneCards,
+      styleContract: null,
       payoffRefs: chapter.payoffRefsJson ? JSON.parse(chapter.payoffRefsJson) as string[] : [],
       createdAt: chapter.createdAt.toISOString(),
       updatedAt: chapter.updatedAt.toISOString(),
@@ -178,6 +202,18 @@ export function mapVersionRow(row: VolumeVersionRow): VolumePlanVersion {
     version: row.version,
     status: row.status,
     contentJson: row.contentJson,
+    diffSummary: row.diffSummary,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+export function mapVersionSummaryRow(row: VolumeVersionSummaryRow): VolumePlanVersionSummary {
+  return {
+    id: row.id,
+    novelId: row.novelId,
+    version: row.version,
+    status: row.status,
     diffSummary: row.diffSummary,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
