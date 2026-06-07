@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: write
-  workflows: write  # 允许写入 workflow 文件
 
 jobs:
   sync:
@@ -40,4 +39,4 @@ jobs:
         env:
           # 需要有 repo 权限的 PAT，可存在项目的 Secrets 中，如：ACTIONS_DEPLOY_KEY
           # GITHUB_TOKEN 也可用，但可能有权限限制
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.UPDATE }}
