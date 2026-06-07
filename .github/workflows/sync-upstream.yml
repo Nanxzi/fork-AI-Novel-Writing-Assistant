@@ -5,13 +5,13 @@ on:
     - cron: '0 4 * * 6'  # 每周六北京12点 UTC时间4点执行一次
   workflow_dispatch:      # 允许手动触发
 
+permissions:
+  contents: write
+  workflows: write  # 允许写入 workflow 文件
+
 jobs:
   sync:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write  # 允许写入代码，确保GITHUB_TOKEN有推送权限
-      workflows: write  # 允许写入 workflow 文件
-      
     steps:
       - name: Checkout
         uses: actions/checkout@v4
