@@ -2,18 +2,21 @@ name: Sync upstream
 
 on:
   schedule:
-    - cron: '0 4 * * 6'  # 每周六北京12点 UTC时间4点执行一次
+    - cron: '0 4 * * *'  # 北京12点 UTC时间4点执行一次
   workflow_dispatch:      # 允许手动触发
-
-permissions:
-  contents: write
 
 jobs:
   sync:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write       # 必须：允许写入代码
+      actions: write        # 补充：避免Actions相关权限遗漏
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # 拉取完整历史，避免合并报错
+          persist-credentials: false  # 禁用默认凭证缓存（关键）
 
       - name: Set up Git
         run: |
@@ -33,10 +36,13 @@ jobs:
           git add .
           git commit -m "auto-resolve conflict using upstream (theirs)" || true
           
-      - name: Push changes
-        run: |
-          git push origin main --force
+      - name: Push changes with explicit token
         env:
-          # 需要有 repo 权限的 PAT，可存在项目的 Secrets 中，如：ACTIONS_DEPLOY_KEY
-          # GITHUB_TOKEN 也可用，但可能有权限限制
-          GITHUB_TOKEN: ${{ secrets.UPDATE }}
+          GH_TOKEN: ${{ secrets.REPO_TOKEN }}
+          REPO_URL: https://github.com/WuXiangM/fork-AI-Novel-Writing-Assistant.git
+        run: |
+          # 重新设置origin remote，显式带上token（核心修复）
+          git remote remove origin
+          git remote add origin https://x-access-token:${GH_TOKEN}@github.com/WuXiangM/fork_banana-slides.git
+          # 推送（如需强制推送，改为 git push origin main --force）
+          git push origin main
