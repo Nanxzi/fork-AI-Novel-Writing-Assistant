@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write  # 允许写入代码，确保GITHUB_TOKEN有推送权限
-      actions: write
+      workflows: write  # 允许写入 workflow 文件
       
     steps:
       - name: Checkout
