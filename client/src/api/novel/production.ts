@@ -4,7 +4,7 @@ import type {
   ArtifactSyncMode,
   CreativeDecision,
   Novel,
-  NovelSnapshot,
+  NovelSnapshotListItem,
   PipelineJob,
   PipelineRepairMode,
   PipelineRunMode,
@@ -39,7 +39,7 @@ export async function getNovelPipelineJob(id: string, jobId: string) {
 }
 
 export async function listNovelSnapshots(id: string) {
-  const { data } = await apiClient.get<ApiResponse<NovelSnapshot[]>>(`/novels/${id}/snapshots`);
+  const { data } = await apiClient.get<ApiResponse<NovelSnapshotListItem[]>>(`/novels/${id}/snapshots`);
   return data;
 }
 
@@ -47,7 +47,7 @@ export async function createNovelSnapshot(
   id: string,
   payload: { triggerType: "manual" | "auto_milestone" | "before_pipeline"; label?: string },
 ) {
-  const { data } = await apiClient.post<ApiResponse<NovelSnapshot>>(`/novels/${id}/snapshots`, payload);
+  const { data } = await apiClient.post<ApiResponse<NovelSnapshotListItem>>(`/novels/${id}/snapshots`, payload);
   return data;
 }
 
@@ -92,4 +92,16 @@ export async function batchInvalidateCreativeDecisions(id: string, decisionIds: 
     { decisionIds },
   );
   return data;
+}
+
+/**
+ * [开发工具] 重置指定小说的所有章节正文及相关生成数据，供测试重跑使用。
+ * 清除范围：章节正文、生成状态、事实账本、章节摘要、质量报告等。
+ */
+export async function devResetNovelChapters(id: string): Promise<{ resetCount: number }> {
+  const { data } = await apiClient.post<ApiResponse<{ resetCount: number }>>(
+    `/novels/${id}/dev/reset-chapters`,
+    {},
+  );
+  return data.data ?? { resetCount: 0 };
 }

@@ -524,6 +524,13 @@ export const macroConstraintContextSchema = z.object({
   hardConstraints: z.array(z.string()).default([]),
 });
 
+export const volumeKeyMilestoneGuardSchema = z.object({
+  targetChapterRange: z.string(),
+  event: z.string(),
+  status: z.enum(["not_yet", "in_progress", "done"]).default("not_yet"),
+  note: z.string(),
+});
+
 export const volumeWindowContextSchema = z.object({
   volumeId: z.string().nullable().optional(),
   sortOrder: z.number().int().nullable().optional(),
@@ -532,6 +539,7 @@ export const volumeWindowContextSchema = z.object({
   adjacentSummary: z.string(),
   pendingPayoffs: z.array(z.string()).default([]),
   softFutureSummary: z.string(),
+  keyMilestoneGuards: z.array(volumeKeyMilestoneGuardSchema).default([]),
 });
 
 export const chapterMissionContextSchema = z.object({
@@ -673,6 +681,7 @@ export const chapterWriteContextSchema = z.object({
   bookContract: bookContractContextSchema,
   macroConstraints: macroConstraintContextSchema.nullable(),
   volumeWindow: volumeWindowContextSchema.nullable(),
+  narrativeProgressHint: z.string().nullable().optional(),
   chapterMission: chapterMissionContextSchema,
   nextAction: generationNextActionSchema.default("write_chapter"),
   chapterStateGoal: chapterStateGoalSchema.nullable().optional(),
@@ -710,6 +719,8 @@ export const chapterWriteContextSchema = z.object({
   styleConstraints: z.array(z.string()).default([]),
   continuationConstraints: z.array(z.string()).default([]),
   ragFacts: z.array(z.string()).default([]),
+  completedMilestones: z.array(z.string()).default([]),
+  recentScenePatterns: z.array(z.string()).default([]),
 });
 
 export const chapterReviewContextSchema = chapterWriteContextSchema.extend({
@@ -758,6 +769,7 @@ export const generationContextPackageSchema = z.object({
   bookContract: bookContractContextSchema.nullable().optional(),
   macroConstraints: macroConstraintContextSchema.nullable().optional(),
   volumeWindow: volumeWindowContextSchema.nullable().optional(),
+  narrativeProgressHint: z.string().nullable().optional(),
   ledgerPendingItems: z.array(runtimePayoffLedgerItemSchema).default([]),
   ledgerUrgentItems: z.array(runtimePayoffLedgerItemSchema).default([]),
   ledgerOverdueItems: z.array(runtimePayoffLedgerItemSchema).default([]),
