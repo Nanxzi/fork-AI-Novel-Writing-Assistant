@@ -37,6 +37,15 @@
 - 建议优先下载 `Setup.exe` 安装版；如果你不想安装，或者想放在 U 盘 / 临时目录里直接运行，再选择 `portable` 版本
 - 公开介绍站：[GitHub Pages 介绍站](https://explosivecoderflome.github.io/AI-Novel-Writing-Assistant/) 提供功能预览、模块文档和使用指南
 
+## 用 Codex 持续创作长篇：Ani Book Skill
+
+如果你希望直接在 Codex 的本地工作区推进小说，可以使用 [Ani Book Skill](https://github.com/ExplosiveCoderflome/ani-book-skill)。它将方向判断、故事发动机、章节推进、审校修复和连续性管理组织为一条可恢复、可追溯的长篇创作流程。
+
+这是一条与本项目互补的创作入口：
+
+- 需要可视化创作工作台、模型配置、运行实况与小说资产管理：使用本仓库。
+- 希望在 Codex 中通过本地文件、阶段工件和 Skill 直接持续创作：前往 [Ani Book Skill](https://github.com/ExplosiveCoderflome/ani-book-skill)。
+
 ## 项目定位
 
 很多 AI 写作工具的使用方式其实差不多：你输入一句 Prompt，它回你一段正文，不满意就重试。写短篇还行，写长篇容易越写越散。
@@ -140,10 +149,10 @@
 
 完整历史更新见 [docs/releases/release-notes.md](./docs/releases/release-notes.md)。
 
-### 2026-07-17（v0.4.5 正式发布）
+### 2026-07-17
 
-- 章节执行左侧队列会在自身区域内滚动，章节较多时可以继续查看并选择最后一章。
-- 手动新建且尚未开始的空白章节会显示“移除空白章节”；确认后可安全移除。已经有正文、目标、任务单、场景卡或正在进入生产流程的章节会保留并受到保护。
+- 左侧导航菜单会在固定高度内独立滚动，窗口高度较小时也可以访问底部的系统入口。
+- README 在桌面版入口后直接展示 [Ani Book Skill](https://github.com/ExplosiveCoderflome/ani-book-skill)，方便想在 Codex 本地工作区里直接推进长篇中文小说的人选择适合自己的创作入口。
 
 > 查看完整更新历史：[docs/releases/release-notes.md](./docs/releases/release-notes.md)
 
