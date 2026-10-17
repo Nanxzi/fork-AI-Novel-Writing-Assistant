@@ -2,7 +2,7 @@
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { BOOK_ANALYSIS_SECTIONS } from "@ai-novel/shared/types/bookAnalysis";
-import type { DirectorContinuationMode, DirectorLockScope, DirectorSessionState, DirectorStepCalibrationAction } from "@ai-novel/shared/types/novelDirector";
+import type { DirectorContinuationMode, DirectorLockScope, DirectorSessionState, DirectorStepCalibrationAction, DirectorStepCalibrationRequest } from "@ai-novel/shared/types/novelDirector";
 import { extractDirectorTaskSeedPayloadFromMeta } from "@ai-novel/shared/types/novelDirector";
 import type { AutoDirectorAction, AutoDirectorMutationActionCode } from "@ai-novel/shared/types/autoDirectorFollowUp";
 import type { DirectorBookAutomationAction, DirectorDashboardMode, DirectorTaskSnapshot } from "@ai-novel/shared/types/directorRuntime";
@@ -80,10 +80,10 @@ import NovelExistingProjectTakeoverDialog from "./components/NovelExistingProjec
 import { syncNovelWorkflowStageSilently, workflowStageFromTab } from "./novelWorkflow.client";
 import { isNovelWorkspaceFlowTab, scopeFromWorkspaceTab, tabFromDirectorDisplayStage, tabFromDirectorProgress, tabFromScope, type NovelWorkspaceFlowTab } from "./novelWorkspaceNavigation";
 import { resolveChapterTitleWarning } from "@/lib/directorTaskNotice";
+import { getDirectorCockpitActionHref, getTaskSourceHref } from "@/lib/novelRoutes";
 import { resolveInternalNavigationTarget } from "@/lib/internalNavigation";
 import { resolveDirectorContinueMode, resolveWorkflowContinuationFeedback } from "@/lib/novelWorkflowContinuation";
 import {
-  getDirectorCockpitActionHref,
   getDirectorCockpitContinuationMode,
   isDirectorCockpitContinuationAction,
 } from "@/lib/directorCockpitActions";
@@ -103,8 +103,6 @@ import {
   resolveTakeoverDialogContextTaskId,
   resolveAutomationActionText,
   resolveTakeoverModeFromAutomation,
-  shouldPreserveRequestedDirectorTaskId,
-  shouldAutofocusProjectedDirectorTask,
 } from "./novelEditAutomationStatus";
 
 function mapDashboardModeToTakeoverMode(mode: DirectorDashboardMode | null | undefined): NovelEditTakeoverState["mode"] | null {
@@ -195,6 +193,10 @@ import {
 } from "./novelBasicInfo.shared";
 import { useStructuredOutlineWorkspaceStore } from "./stores/useStructuredOutlineWorkspaceStore";
 import {
+  EMPTY_DIRECTOR_FOLLOW_MEMORY,
+  resolveStructuredOutlineDirectorFollow,
+} from "./stores/structuredOutlineDirectorFollow";
+import {
   applyVolumeChapterBatch,
   buildVolumePlanningReadiness,
   buildOutlinePreviewFromVolumes,
@@ -260,13 +262,10 @@ export default function NovelEdit() {
   const {
     activeTab,
     setActiveTab,
-    directorTaskId,
-    setDirectorTaskId,
     selectedChapterId,
     setSelectedChapterId,
     selectedVolumeId,
     setSelectedVolumeId,
-    workflowTaskId,
     taskPanelOpen,
     clearTaskPanelOpen,
   } = useNovelEditWorkflow(id);
@@ -697,9 +696,8 @@ export default function NovelEdit() {
     : latestAutoDirectorTask;
   const activeAutoDirectorTask = activeDirectorTask;
   const bookAutomationProjection = bookAutomationQuery.data?.data?.projection ?? null;
-  const requestedDirectorTaskId = directorTaskId
+  const requestedDirectorTaskId = bookAutomationProjection?.latestTask?.id
     || activeAutoDirectorTask?.id
-    || (shouldAutofocusProjectedDirectorTask(bookAutomationProjection) ? bookAutomationProjection?.latestTask?.id : "")
     || "";
   const requestedDirectorTaskQuery = useQuery({
     queryKey: queryKeys.tasks.detail("novel_workflow", requestedDirectorTaskId || "none"),
@@ -711,47 +709,16 @@ export default function NovelEdit() {
   const visibleDirectorTask = useMemo(
     () => {
       const sourceTask = requestedDirectorTask ?? activeAutoDirectorTask;
-      if (!directorTaskId && !taskPanelOpen && sourceTask?.status === "cancelled") {
+      if (!taskPanelOpen && sourceTask?.status === "cancelled") {
         return null;
       }
       return buildDisplayAutoDirectorTask(sourceTask, bookAutomationProjection);
     },
-    [activeAutoDirectorTask, bookAutomationProjection, directorTaskId, requestedDirectorTask, taskPanelOpen],
+    [activeAutoDirectorTask, bookAutomationProjection, requestedDirectorTask, taskPanelOpen],
   );
   const displayAutoDirectorTask = visibleDirectorTask;
   const actionTargetDirectorTaskId = visibleDirectorTask?.id ?? "";
   const selectedDirectorTaskId = visibleDirectorTask?.id ?? requestedDirectorTaskId;
-  useEffect(() => {
-    if (!id || !activeAutoDirectorTaskQuery.isSuccess) {
-      return;
-    }
-    const canonicalDirectorTaskId = activeAutoDirectorTask?.id ?? "";
-    if (!canonicalDirectorTaskId && taskPanelOpen && directorTaskId) {
-      return;
-    }
-    if (!canonicalDirectorTaskId && directorTaskId && !requestedDirectorTaskQuery.isFetched) {
-      return;
-    }
-    if (!canonicalDirectorTaskId && shouldPreserveRequestedDirectorTaskId({
-      directorTaskId,
-      requestedTask: requestedDirectorTask,
-    })) {
-      return;
-    }
-    if (directorTaskId === canonicalDirectorTaskId) {
-      return;
-    }
-    setDirectorTaskId(canonicalDirectorTaskId);
-  }, [
-    activeAutoDirectorTask?.id,
-    activeAutoDirectorTaskQuery.isSuccess,
-    directorTaskId,
-    id,
-    requestedDirectorTask,
-    requestedDirectorTaskQuery.isFetched,
-    setDirectorTaskId,
-    taskPanelOpen,
-  ]);
   useEffect(() => {
     if (!id || !activeAutoDirectorTaskQuery.isSuccess) {
       return;
@@ -860,6 +827,8 @@ export default function NovelEdit() {
   const autoDirectorRefreshSignatureRef = useRef("");
   const autoDirectorArtifactSignatureRef = useRef("");
   const autoDirectorWorkspaceSignatureRef = useRef("");
+  // 记录上一次跟随过的导演目标章节：目标不变时，不因草稿变更重复抢回工作区选中（issue #172）。
+  const directorFollowMemoryRef = useRef({ ...EMPTY_DIRECTOR_FOLLOW_MEMORY });
   const activeAutoDirectorRefreshSignature = useMemo(() => {
     if (!activeAutoDirectorTask) {
       return "";
@@ -964,6 +933,7 @@ export default function NovelEdit() {
       invalidations.push(
         queryClient.invalidateQueries({ queryKey: queryKeys.tasks.detail("novel_workflow", taskId) }),
         queryClient.invalidateQueries({ queryKey: queryKeys.tasks.directorTaskSnapshot(taskId) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.tasks.directorTaskFactInspection(taskId) }),
         queryClient.invalidateQueries({ queryKey: queryKeys.tasks.directorRuntime(taskId) }),
         queryClient.invalidateQueries({ queryKey: queryKeys.autoDirectorFollowUps.detail(taskId) }),
       );
@@ -1057,7 +1027,6 @@ export default function NovelEdit() {
     onSuccess: async (response, input) => {
       const targetTaskId = input?.directorTaskId || actionTargetDirectorTaskId;
       const targetTask = targetTaskId === visibleDirectorTask?.id ? visibleDirectorTask : activeAutoDirectorTask;
-      setDirectorTaskId(response.data?.taskId ?? targetTaskId);
       void invalidateAutoDirectorTaskState(response.data?.taskId ?? targetTaskId);
       const feedback = resolveWorkflowContinuationFeedback(response.data, {
         mode: resolveDirectorContinueMode(targetTask),
@@ -1096,7 +1065,6 @@ export default function NovelEdit() {
   const acceptManualChangesAndContinueMutation = useMutation({
     mutationFn: (directorTaskId: string) => acceptManualChangesAndContinueDirector(directorTaskId),
     onSuccess: async (response, directorTaskId) => {
-      setDirectorTaskId(response.data?.taskId ?? directorTaskId);
       await invalidateAutoDirectorTaskState(response.data?.taskId ?? directorTaskId);
       toast.success("已确认当前修改，导演将从下一个未完成步骤继续。");
     },
@@ -1117,7 +1085,6 @@ export default function NovelEdit() {
     onSuccess: async (response, input) => {
       const targetTaskId = input?.directorTaskId || actionTargetDirectorTaskId;
       const targetTask = targetTaskId === visibleDirectorTask?.id ? visibleDirectorTask : activeAutoDirectorTask;
-      setDirectorTaskId(response.data?.taskId ?? targetTaskId);
       void invalidateAutoDirectorTaskState(response.data?.taskId ?? targetTaskId);
       const feedback = resolveWorkflowContinuationFeedback(response.data, {
         mode: input?.continuationMode ?? "auto_execute_range",
@@ -1144,7 +1111,6 @@ export default function NovelEdit() {
       input.mode ? { continuationMode: input.mode } : undefined,
     ),
     onSuccess: async (response, input) => {
-      setDirectorTaskId(response.data?.taskId ?? input.taskId);
       void invalidateAutoDirectorTaskState(response.data?.taskId ?? input.taskId);
       const feedback = resolveWorkflowContinuationFeedback(response.data, {
         mode: input.mode,
@@ -1185,7 +1151,6 @@ export default function NovelEdit() {
       if (result?.task) {
         syncAutoDirectorTaskCache(queryClient, id, result.task);
       }
-      setDirectorTaskId(result?.directorTaskId ?? result?.taskId ?? input.directorTaskId ?? actionTargetDirectorTaskId);
       await invalidateAutoDirectorTaskState(result?.directorTaskId ?? result?.taskId ?? input.directorTaskId ?? actionTargetDirectorTaskId);
       if (result?.code === "failed" || result?.code === "forbidden") {
         toast.error(result.message);
@@ -1290,7 +1255,7 @@ export default function NovelEdit() {
       const internalTarget = resolveInternalNavigationTarget(targetUrl);
       if (internalTarget) {
         setIsTaskDrawerOpen(false);
-        navigate(internalTarget);
+        navigate(getTaskSourceHref(internalTarget));
         return;
       }
       if (/^https?:\/\//i.test(targetUrl)) {
@@ -1992,38 +1957,34 @@ export default function NovelEdit() {
     if (!id) {
       return;
     }
-    useStructuredOutlineWorkspaceStore.getState().patchWorkspace(id, {
-      selectedVolumeId: selectedVolumeId || undefined,
-      selectedChapterId: selectedChapterId || undefined,
-    });
+    // URL 参数为空时不做任何同步：undefined 不得覆盖用户已选的工作区状态（issue #172）。
+    const patch: { selectedVolumeId?: string; selectedChapterId?: string } = {};
+    if (selectedVolumeId) {
+      patch.selectedVolumeId = selectedVolumeId;
+    }
+    if (selectedChapterId) {
+      patch.selectedChapterId = selectedChapterId;
+    }
+    if (Object.keys(patch).length === 0) {
+      return;
+    }
+    useStructuredOutlineWorkspaceStore.getState().patchWorkspace(id, patch);
   }, [id, selectedChapterId, selectedVolumeId]);
 
   useEffect(() => {
-    if (!id || activeTab !== "structured" || !activeStructuredOutlineChapterId) {
-      return;
-    }
-    const targetVolume = normalizedVolumeDraft.find((volume) => (
-      volume.chapters.some((chapter) => (
-        chapter.id === activeStructuredOutlineChapterId
-        || chapter.chapterId === activeStructuredOutlineChapterId
-      ))
-    ));
-    if (!targetVolume) {
-      return;
-    }
-    const currentWorkspace = useStructuredOutlineWorkspaceStore.getState().workspaces[id];
-    if (
-      currentWorkspace?.selectedChapterId === activeStructuredOutlineChapterId
-      && currentWorkspace.selectedVolumeId === targetVolume.id
-      && currentWorkspace.selectedBeatKey === "all"
-    ) {
-      return;
-    }
-    useStructuredOutlineWorkspaceStore.getState().patchWorkspace(id, {
-      selectedVolumeId: targetVolume.id,
-      selectedChapterId: activeStructuredOutlineChapterId,
-      selectedBeatKey: "all",
+    const { patch, memory } = resolveStructuredOutlineDirectorFollow({
+      novelId: id,
+      activeTab,
+      directorChapterId: activeStructuredOutlineChapterId,
+      volumes: normalizedVolumeDraft,
+      workspace: useStructuredOutlineWorkspaceStore.getState().workspaces[id],
+      memory: directorFollowMemoryRef.current,
     });
+    directorFollowMemoryRef.current = memory;
+    if (!patch) {
+      return;
+    }
+    useStructuredOutlineWorkspaceStore.getState().patchWorkspace(id, patch);
   }, [activeStructuredOutlineChapterId, activeTab, id, normalizedVolumeDraft]);
 
   useEffect(() => {
@@ -2418,7 +2379,6 @@ export default function NovelEdit() {
     variant: "default" | "outline" | "secondary" = "default",
   ) => {
     const takeoverContextTaskId = resolveTakeoverDialogContextTaskId({
-      directorTaskId,
       activeAutoDirectorTask,
       projection: bookAutomationProjection,
     });
@@ -2639,6 +2599,25 @@ export default function NovelEdit() {
       ? rejectCharacterResourceProposalMutation.variables ?? ""
       : "",
     chapterAuditReports,
+    manualDirectorHandoff: {
+      enabled: Boolean(
+        displayAutoDirectorTask?.id
+        && selectedChapter?.content?.trim()
+        && (
+          displayAutoDirectorTask.pendingManualRecovery
+          || (
+            displayAutoDirectorTask.status === "waiting_approval"
+            && displayAutoDirectorTask.checkpointType === "step_review_required"
+          )
+        )
+      ),
+      isAccepting: acceptManualChangesAndContinueMutation.isPending,
+      onAccept: () => {
+        if (displayAutoDirectorTask?.id) {
+          acceptManualChangesAndContinueMutation.mutate(displayAutoDirectorTask.id);
+        }
+      },
+    },
     backgroundSyncActivities: pipelineBackgroundActivities,
     isGeneratingChapterPlan: generateChapterPlanMutation.isPending,
     isReplanningChapter: replanChapterMutation.isPending,
@@ -2804,6 +2783,19 @@ export default function NovelEdit() {
       characterTab={characterTab}
       takeover={isTakeoverDismissed ? null : takeover}
       activeStepTakeoverEntry={activeStepTakeoverEntry}
+      directorStepCalibration={displayAutoDirectorTask ? {
+        taskId: displayAutoDirectorTask.id,
+        activeStepId: extractDirectorTaskSeedPayloadFromMeta(displayAutoDirectorTask.meta)?.stepReview?.stepId
+          ?? displayAutoDirectorTask.currentItemKey
+          ?? null,
+        enabled: displayAutoDirectorTask.status === "waiting_approval"
+          && displayAutoDirectorTask.checkpointType === "step_review_required",
+        isSubmitting: calibrateDirectorStepMutation.isPending,
+        onSubmit: (request: DirectorStepCalibrationRequest) => calibrateDirectorStepMutation.mutate({
+          directorTaskId: displayAutoDirectorTask.id,
+          ...request,
+        }),
+      } : undefined}
       onSwitchToSimpleMode={() => switchToSimpleMutation.mutate()}
       isSwitchingToSimpleMode={switchToSimpleMutation.isPending}
       taskDrawer={{

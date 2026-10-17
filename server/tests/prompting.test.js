@@ -45,6 +45,7 @@ const {
 const {
   styleDetectionPrompt,
   styleRewritePrompt,
+  styleGenerationPrompt,
   styleProfileExtractionPrompt,
   styleProfileFromBookAnalysisPrompt,
 } = require("../dist/prompting/prompts/style/style.prompts.js");
@@ -151,14 +152,14 @@ test("prompt registry exposes versioned planning assets", () => {
     "agent.runtime.fallback_answer@v1",
     "agent.runtime.setup_guidance@v1",
     "agent.runtime.setup_ideation@v1",
-    "planner.chapter.plan@v1",
+    "planner.chapter.plan@v3",
     "novel.director.candidates@v2",
     "novel.director.candidate_patch@v1",
     "novel.director.blueprint@v1",
-    "novel.character.castOptions@v2",
+    "novel.character.castOptions@v3",
     "novel.character.castOptions.repair@v1",
     "novel.character.castOptions.zhNormalize@v1",
-    "novel.character.supplemental@v1",
+    "novel.character.supplemental@v2",
     "novel.character.supplemental.zhNormalize@v1",
     "novel.character.mind.snapshot@v1",
     "novel.character.influence.options@v1",
@@ -177,7 +178,7 @@ test("prompt registry exposes versioned planning assets", () => {
     "novel.framing.suggest@v1",
     "novel.production.characters@v1",
     "state.snapshot.extract@v4",
-    "novel.payoff_ledger.sync@v6",
+    "novel.payoff_ledger.sync@v8",
     "novel.characterDynamics.volumeProjection@v3",
     "novel.character_resource.extract_updates@v1",
     "storyMode.child.generate@v1",
@@ -213,7 +214,7 @@ test("prompt registry exposes versioned planning assets", () => {
     assert.ok(getRegisteredPromptAsset(id, version), `missing prompt asset ${key}`);
   }
 
-  const chapterAsset = getRegisteredPromptAsset("planner.chapter.plan", "v1");
+  const chapterAsset = getRegisteredPromptAsset("planner.chapter.plan", "v3");
   assert.ok(chapterAsset);
   assert.equal(chapterAsset.taskType, "planner");
 });
@@ -417,7 +418,7 @@ test("prompt registry resolves style prompts by their declared asset versions", 
 });
 
 test("character cast prompt hardens real-name constraints and required gender output", () => {
-  const asset = getRegisteredPromptAsset("novel.character.castOptions", "v2");
+  const asset = getRegisteredPromptAsset("novel.character.castOptions", "v3");
   assert.ok(asset);
 
   const messages = asset.render({
@@ -658,13 +659,17 @@ test("chapter writer prompt does not expose scene contract controls", () => {
 
   const systemContent = String(messages[0].content);
   const humanContent = String(messages[1].content);
-  assert.match(systemContent, /本章目标长度：约 3000 字/);
-  assert.match(systemContent, /不得明显超过上限/);
-  assert.doesNotMatch(systemContent, /当前场景合同/);
-  assert.doesNotMatch(systemContent, /场景标题/);
-  assert.doesNotMatch(systemContent, /控字数模式/);
-  assert.doesNotMatch(systemContent, /本轮硬上限/);
-  assert.doesNotMatch(humanContent, /只写当前场景/);
+  const taskSystemContent = String(messages[2].content);
+  assert.equal(messages[2]._getType(), "system");
+  assert.match(taskSystemContent, /本章目标长度：约 3000 字/);
+  assert.match(taskSystemContent, /不得明显超过上限/);
+  assert.doesNotMatch(systemContent, /本章目标长度/);
+  const allSystemContent = messages.filter(message => message._getType() === "system").map(message => String(message.content)).join("\n");
+  assert.doesNotMatch(allSystemContent, /当前场景合同/);
+  assert.doesNotMatch(allSystemContent, /场景标题/);
+  assert.doesNotMatch(allSystemContent, /控字数模式/);
+  assert.doesNotMatch(allSystemContent, /本轮硬上限/);
+  assert.doesNotMatch(humanContent + String(messages[3].content), /只写当前场景/);
 });
 
 test("novel main-chain prompt assets declare explicit non-zero context budgets", () => {
@@ -679,13 +684,13 @@ test("novel main-chain prompt assets declare explicit non-zero context budgets",
     ["novel.volume.skeleton@v3", NOVEL_PROMPT_BUDGETS.volumeSkeleton],
     ["novel.volume.beat_sheet@v3", NOVEL_PROMPT_BUDGETS.volumeBeatSheet],
     ["novel.volume.chapter_list@v9", NOVEL_PROMPT_BUDGETS.volumeChapterList],
-    ["novel.volume.chapter_purpose@v1", NOVEL_PROMPT_BUDGETS.volumeChapterDetail],
+    ["novel.volume.chapter_purpose@v3", NOVEL_PROMPT_BUDGETS.volumeChapterDetail],
     ["novel.volume.chapter_boundary@v1", NOVEL_PROMPT_BUDGETS.volumeChapterDetail],
     ["novel.volume.chapter_task_sheet@v3", NOVEL_PROMPT_BUDGETS.volumeChapterDetail],
     ["novel.volume.rebalance.adjacent@v1", NOVEL_PROMPT_BUDGETS.volumeRebalance],
     [promptKey(chapterWriterPrompt), NOVEL_PROMPT_BUDGETS.chapterWriter],
     ["novel.review.chapter@v2", NOVEL_PROMPT_BUDGETS.chapterReview],
-    ["novel.review.repair@v2", NOVEL_PROMPT_BUDGETS.chapterRepair],
+    ["novel.review.repair@v3", NOVEL_PROMPT_BUDGETS.chapterRepair],
     ["audit.chapter.full@v2", NOVEL_PROMPT_BUDGETS.chapterReview],
   ]);
 
@@ -744,8 +749,9 @@ test("chapter writer prompt carries explicit target length and continuation inst
     summarizedBlockIds: [],
     estimatedInputTokens: 0,
   });
-  assert.match(String(draftMessages[0].content), /本章目标长度：约 3000 字/);
-  assert.match(String(draftMessages[0].content), /2550-3450/);
+  assert.equal(draftMessages[2]._getType(), "system");
+  assert.match(String(draftMessages[2].content), /本章目标长度：约 3000 字/);
+  assert.match(String(draftMessages[2].content), /2550-3450/);
 
   const continueMessages = asset.render({
     novelTitle: "霜轨档案",
@@ -763,9 +769,10 @@ test("chapter writer prompt carries explicit target length and continuation inst
     summarizedBlockIds: [],
     estimatedInputTokens: 0,
   });
-  assert.match(String(continueMessages[0].content), /不得重写章节开头/);
-  assert.match(String(continueMessages[0].content), /至少缺少约 900 字/);
-  assert.match(String(continueMessages[1].content), /任务模式：补写当前章节/);
+  assert.equal(continueMessages[2]._getType(), "system");
+  assert.match(String(continueMessages[2].content), /不得重写章节开头/);
+  assert.match(String(continueMessages[2].content), /本次追加目标约 900 字的有效正文，补足后自然收束/);
+  assert.match(String(continueMessages[3].content), /任务模式：补写当前章节/);
 });
 
 test("director blueprint schema accepts chapter shells without scenes", () => {
@@ -1392,7 +1399,7 @@ test("runStructuredPrompt forwards repair policy and context telemetry", async (
   const originalContextPolicy = { ...genreTreePrompt.contextPolicy };
   let captured = null;
 
-  genreTreePrompt.repairPolicy = { maxAttempts: 3 };
+  genreTreePrompt.repairPolicy = { maxAttempts: 3, guidance: "保留原始分类层级，不要编造节点。" };
   genreTreePrompt.contextPolicy = {
     maxTokensBudget: 8,
     requiredGroups: ["core"],
@@ -1441,6 +1448,7 @@ test("runStructuredPrompt forwards repair policy and context telemetry", async (
     });
 
     assert.equal(captured.maxRepairAttempts, 3);
+    assert.equal(captured.repairGuidance, "保留原始分类层级，不要编造节点。");
     assert.equal(captured.promptMeta.repairAttempts, 0);
     assert.equal(captured.promptMeta.semanticRetryAttempts, 0);
     assert.deepEqual(captured.promptMeta.droppedContextBlockIds, ["overflow-1"]);
@@ -1554,11 +1562,14 @@ test("runStructuredPrompt retries semantically after postValidate failure", asyn
   }
 });
 
+// Runner transport tests use a registered text asset, independent of structured rewriting.
+const textRunnerFixture = { ...styleGenerationPrompt };
+
 test("streamTextPrompt buffers streamed output and resolves completion metadata", async () => {
   resetPromptQualityTelemetryForTests();
-  const originalContextPolicy = { ...styleRewritePrompt.contextPolicy };
+  const originalContextPolicy = { ...textRunnerFixture.contextPolicy };
   let capturedOptions = null;
-  styleRewritePrompt.contextPolicy = {
+  textRunnerFixture.contextPolicy = {
     maxTokensBudget: 8,
     requiredGroups: ["core"],
     dropOrder: ["overflow"],
@@ -1578,12 +1589,14 @@ test("streamTextPrompt buffers streamed output and resolves completion metadata"
 
   try {
     const handle = await streamTextPrompt({
-      asset: styleRewritePrompt,
+      asset: textRunnerFixture,
       promptInput: {
         styleBlock: "叙事紧凑",
         characterBlock: "动作表达情绪",
         antiAiBlock: "禁止解释性心理描写",
         content: "原文",
+        prompt: "原文",
+        mode: "rewrite",
         issuesBlock: "问题",
       },
       contextBlocks: [
@@ -1626,7 +1639,7 @@ test("streamTextPrompt buffers streamed output and resolves completion metadata"
     assert.equal(telemetry.emptyOutputCount, 0);
     assert.equal(telemetry.totalOutputChars, 2);
   } finally {
-    styleRewritePrompt.contextPolicy = originalContextPolicy;
+    textRunnerFixture.contextPolicy = originalContextPolicy;
     setPromptRunnerLLMFactoryForTests();
   }
 });
@@ -1650,12 +1663,14 @@ test("runTextPrompt records empty outputs without changing return behavior", asy
 
   try {
     const result = await runTextPrompt({
-      asset: styleRewritePrompt,
+      asset: textRunnerFixture,
       promptInput: {
         styleBlock: "叙事紧凑",
         characterBlock: "动作表达情绪",
         antiAiBlock: "禁止解释性心理描写",
         content: "原文",
+        prompt: "原文",
+        mode: "rewrite",
         issuesBlock: "问题",
       },
     });
@@ -1687,12 +1702,14 @@ test("prompt runner records failed executions without swallowing the original er
   try {
     await assert.rejects(
       () => runTextPrompt({
-        asset: styleRewritePrompt,
+        asset: textRunnerFixture,
         promptInput: {
           styleBlock: "叙事紧凑",
           characterBlock: "动作表达情绪",
           antiAiBlock: "禁止解释性心理描写",
           content: "原文",
+        prompt: "原文",
+        mode: "rewrite",
           issuesBlock: "问题",
         },
       }),
@@ -1812,12 +1829,14 @@ test("prompt runner skips custom slot overlays for prompts without editable slot
 
   try {
     const handle = await streamTextPrompt({
-      asset: styleRewritePrompt,
+      asset: textRunnerFixture,
       promptInput: {
         styleBlock: "叙事紧凑",
         characterBlock: "动作表达情绪",
         antiAiBlock: "禁止解释性心理描写",
         content: "原文",
+        prompt: "原文",
+        mode: "rewrite",
         issuesBlock: "问题",
       },
       contextBlocks: [],
@@ -2138,6 +2157,49 @@ test("streamStructuredPrompt parses streamed JSON and preserves telemetry", asyn
   } finally {
     genreTreePrompt.contextPolicy = originalContextPolicy;
     setPromptRunnerLLMFactoryForTests();
+  }
+});
+
+test("streamStructuredPrompt falls back to prompt JSON when native structured streaming is empty", async () => {
+  let streamCall = null;
+  let fallbackCall = null;
+  setPromptRunnerLLMFactoryForTests(async (provider, options) => {
+    return {
+      stream: async (_messages, invokeOptions) => {
+        streamCall = { provider, responseFormat: invokeOptions.response_format?.type };
+        return {
+          async *[Symbol.asyncIterator]() {},
+        };
+      },
+    };
+  });
+  setPromptRunnerStructuredInvokerForTests(async (input) => {
+    fallbackCall = input;
+    return {
+      data: { name: "都市", description: "异能成长", children: [] },
+      repairUsed: false,
+      repairAttempts: 0,
+    };
+  });
+
+  try {
+    const handle = await streamStructuredPrompt({
+      asset: genreTreePrompt,
+      promptInput: { prompt: "都市异能", retry: false, forceJson: true },
+      options: { provider: "deepseek", model: "deepseek-v4-flash" },
+    });
+
+    for await (const _chunk of handle.stream) {
+      // drain stream
+    }
+    const completed = await handle.complete;
+
+    assert.deepEqual(streamCall, { provider: "deepseek", responseFormat: "json_object" });
+    assert.equal(fallbackCall.structuredStrategy, "prompt_json");
+    assert.equal(completed.output.name, "都市");
+  } finally {
+    setPromptRunnerLLMFactoryForTests();
+    setPromptRunnerStructuredInvokerForTests();
   }
 });
 

@@ -1,40 +1,49 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
+import type { ApiResponse } from "@ai-novel/shared/types/api";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type {
   ChapterEditorDiagnosticCard,
+  ChapterEditorCursorContinuationRequest,
+  ChapterEditorCursorOperation,
   ChapterEditorOperation,
   ChapterEditorRecommendedTask,
   ChapterEditorRevisionScope,
   ChapterEditorTargetRange,
+  ChapterEditorWorkspaceResponse,
 } from "@ai-novel/shared/types/novel";
+import { useCandidateAcceptance, useCandidateReview } from "./review";
+import { applySavedRevisionToWorkspace, findRecommendedDiagnostic, removeCompletedDiagnostic } from "./diagnostics";
 import {
   readChapterQualityDebtDetails,
   type ChapterQualityDebtDetails,
 } from "@ai-novel/shared/types/chapterQualityLoop";
 import { AlertTriangle, Loader2 } from "lucide-react";
-import { createNovelSnapshot, previewChapterAiRevision, reviewNovelChapter, updateNovelChapter } from "@/api/novel";
+import { createNovelSnapshot, previewChapterAiRevision, previewChapterCursorContinuation, resolveChapterAuditIssue, reviewNovelChapter, updateNovelChapter } from "@/api/novel";
 import { queryKeys } from "@/api/queryKeys";
 import { Button } from "@/components/ui/button";
 import { toast } from "@/components/ui/toast";
 import { useLLMStore } from "@/store/llmStore";
 import ChapterEditorDirectorPanel from "./ChapterEditorDirectorPanel";
 import ChapterEditorSidebar from "./ChapterEditorSidebar";
+import ChapterVersionDrawer from "./ChapterVersionDrawer";
 import ChapterTextEditor from "./ChapterTextEditor";
-import SelectionAIFloatingToolbar from "./SelectionAIFloatingToolbar";
 import type {
   ChapterEditorSelectionRange,
   ChapterEditorSessionState,
   ChapterEditorShellProps,
-  SelectionToolbarPosition,
 } from "./chapterEditorTypes";
 import {
+  CHAPTER_EDITOR_CURSOR_OPERATION_LABELS,
   CHAPTER_EDITOR_OPERATION_LABELS,
-  applyCandidateToContent,
   buildAiRevisionRequest,
   countEditorWords,
   getSaveStatusLabel,
+  getParagraphWindow,
+  getParagraphIndicesForRange,
   normalizeChapterContent,
-} from "./chapterEditorUtils";
+  useChapterDraft,
+} from "./document";
 
 const EMPTY_SESSION: ChapterEditorSessionState = {
   sessionId: "",
@@ -48,6 +57,7 @@ const EMPTY_SESSION: ChapterEditorSessionState = {
   activeCandidateId: null,
   status: "idle",
   viewMode: "block",
+  mode: "revision",
 };
 
 function formatQualityDebtSource(source: string | null): string {
@@ -96,38 +106,51 @@ export default function ChapterEditorShell(props: ChapterEditorShellProps) {
     workspaceStatus,
     onBack,
     onOpenVersionHistory,
+    onRefreshWorkspace,
+    isRefreshingWorkspace,
   } = props;
   const llm = useLLMStore();
   const queryClient = useQueryClient();
   const lastPreviewRequestRef = useRef<ReturnType<typeof buildAiRevisionRequest> | null>(null);
-  const normalizedChapterContent = useMemo(() => normalizeChapterContent(chapter?.content ?? ""), [chapter?.content]);
+  const lastPreviewDiagnosticRef = useRef<ChapterEditorDiagnosticCard | undefined>(undefined);
+  const lastContinuationRequestRef = useRef<ChapterEditorCursorContinuationRequest | null>(null);
   const qualityDebtDetails = useMemo(
     () => readChapterQualityDebtDetails(chapter?.riskFlags),
     [chapter?.riskFlags],
   );
 
-  const [contentDraft, setContentDraft] = useState(normalizedChapterContent);
-  const [savedContent, setSavedContent] = useState(normalizedChapterContent);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [selection, setSelection] = useState<ChapterEditorSelectionRange | null>(null);
-  const [selectionToolbarPosition, setSelectionToolbarPosition] = useState<SelectionToolbarPosition | null>(null);
+  const [cursorOffset, setCursorOffset] = useState<number | null>(null);
   const [session, setSession] = useState<ChapterEditorSessionState>(EMPTY_SESSION);
   const [revisionScope, setRevisionScope] = useState<ChapterEditorRevisionScope>("selection");
   const [revisionInstruction, setRevisionInstruction] = useState("");
   const [selectedDiagnosticId, setSelectedDiagnosticId] = useState<string | null>(null);
+  const [focusRequestKey, setFocusRequestKey] = useState(0);
+  const [isVersionDrawerOpen, setIsVersionDrawerOpen] = useState(false);
+  const [loadedSnapshotId, setLoadedSnapshotId] = useState<string | null>(null);
+
+  const draft = useChapterDraft({
+    novelId,
+    chapter: chapter ? { id: chapter.id, content: chapter.content, updatedAt: String(chapter.updatedAt) } : undefined,
+    busy: session.status !== "idle",
+  });
+  const { contentDraft, savedContent, isDirty, hasExternalChange, restored, storageError } = draft;
 
   useEffect(() => {
-    const nextContent = normalizedChapterContent;
-    setContentDraft(nextContent);
-    setSavedContent(nextContent);
     setSaveStatus("idle");
     setSelection(null);
-    setSelectionToolbarPosition(null);
+    setCursorOffset(null);
     setSession(EMPTY_SESSION);
     setRevisionInstruction("");
     setRevisionScope("selection");
+    setIsVersionDrawerOpen(false);
+    setLoadedSnapshotId(null);
     lastPreviewRequestRef.current = null;
-  }, [chapter?.id, normalizedChapterContent]);
+    lastPreviewDiagnosticRef.current = undefined;
+    setFocusRequestKey(0);
+    lastContinuationRequestRef.current = null;
+  }, [chapter?.id]);
 
   useEffect(() => {
     if (!workspace) {
@@ -139,16 +162,22 @@ export default function ChapterEditorShell(props: ChapterEditorShellProps) {
     }
   }, [selectedDiagnosticId, workspace]);
 
-  const isDirty = contentDraft !== savedContent;
   const wordCount = useMemo(() => countEditorWords(contentDraft), [contentDraft]);
   const activeCandidate = useMemo(
-    () => session.candidates?.find((candidate) => candidate.id === session.activeCandidateId) ?? null,
+    () => session.candidates?.find((candidate) => candidate.id === session.activeCandidateId) ?? session.candidates?.[0] ?? null,
     [session.activeCandidateId, session.candidates],
   );
   const selectedDiagnosticCard = useMemo(
     () => workspace?.diagnosticCards.find((card) => card.id === selectedDiagnosticId) ?? null,
     [selectedDiagnosticId, workspace],
   );
+  const primaryDiagnosticCard = useMemo(
+    () => workspace ? findRecommendedDiagnostic(workspace) ?? workspace.diagnosticCards[0] ?? null : null,
+    [workspace],
+  );
+  const assistantDiagnosticCard = selectedDiagnosticCard
+    ?? (!selection && cursorOffset === null && revisionScope === "selection" ? primaryDiagnosticCard : null);
+  const actionContext = assistantDiagnosticCard ? "diagnostic" : selection ? "selection" : cursorOffset !== null ? "cursor" : "chapter";
   const selectedDiagnosticSelection = useMemo(
     () => toSelectionFromRange(contentDraft, selectedDiagnosticCard?.anchorRange ?? null),
     [contentDraft, selectedDiagnosticCard?.anchorRange],
@@ -163,10 +192,12 @@ export default function ChapterEditorShell(props: ChapterEditorShellProps) {
       queryClient.invalidateQueries({ queryKey: queryKeys.novels.detail(novelId) }),
       queryClient.invalidateQueries({ queryKey: queryKeys.novels.simpleShelf(novelId) }),
       queryClient.invalidateQueries({ queryKey: queryKeys.novels.qualityReport(novelId) }),
-      queryClient.invalidateQueries({ queryKey: queryKeys.novels.chapterEditorWorkspace(novelId, chapter?.id ?? "none") }),
       queryClient.invalidateQueries({ queryKey: queryKeys.novels.snapshots(novelId) }),
       chapter?.id
         ? queryClient.invalidateQueries({ queryKey: queryKeys.novels.chapterPlan(novelId, chapter.id) })
+        : Promise.resolve(),
+      chapter?.id
+        ? queryClient.invalidateQueries({ queryKey: queryKeys.novels.chapterSnapshots(novelId, chapter.id) })
         : Promise.resolve(),
       chapter?.id
         ? queryClient.invalidateQueries({ queryKey: queryKeys.novels.chapterAuditReports(novelId, chapter.id) })
@@ -175,20 +206,39 @@ export default function ChapterEditorShell(props: ChapterEditorShellProps) {
     ]);
   };
 
+  const leaveEditor = (action?: () => void) => {
+    if (isBusy) {
+      toast.error("请等待当前操作完成后再离开正文编辑。");
+      return;
+    }
+    if ((isDirty || session.status === "ready") && !window.confirm("未保存的修改可从草稿恢复，未采纳的 AI 候选将被关闭。要离开正文编辑吗？")) {
+      return;
+    }
+    action?.();
+  };
+
   const saveMutation = useMutation({
     mutationFn: async (nextContent: string) => {
       if (!chapter) {
         throw new Error("当前未选中章节。");
       }
-      return updateNovelChapter(novelId, chapter.id, { content: nextContent });
+      if (loadedSnapshotId) {
+        await createNovelSnapshot(novelId, {
+          triggerType: "manual",
+          label: `chapter-editor:before-version-load:${chapter.order}:${Date.now()}`,
+        });
+      }
+      return updateNovelChapter(novelId, chapter.id, { content: nextContent, expectedUpdatedAt: draft.savedUpdatedAt, expectedContent: draft.savedContent });
     },
     onMutate: () => {
       setSaveStatus("saving");
     },
-    onSuccess: async (_response, nextContent) => {
-      setSavedContent(nextContent);
+    onSuccess: async (response, nextContent) => {
+      draft.acknowledgeSave(nextContent, { content: response.data?.content, updatedAt: String(response.data?.updatedAt ?? Date.now()) });
+      setLoadedSnapshotId(null);
       setSaveStatus("saved");
       await invalidateChapterQueries();
+      await props.onChapterSaved?.();
       toast.success("章节正文已保存。");
     },
     onError: (error) => {
@@ -196,6 +246,20 @@ export default function ChapterEditorShell(props: ChapterEditorShellProps) {
       toast.error(error instanceof Error ? error.message : "章节保存失败。");
     },
   });
+
+  useEffect(() => {
+    const handleSaveShortcut = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "s") {
+        return;
+      }
+      event.preventDefault();
+      if (chapter && isDirty && !saveMutation.isPending) {
+        saveMutation.mutate(contentDraft);
+      }
+    };
+    window.addEventListener("keydown", handleSaveShortcut);
+    return () => window.removeEventListener("keydown", handleSaveShortcut);
+  }, [chapter, contentDraft, isDirty, saveMutation]);
 
   const reviewMutation = useMutation({
     mutationFn: async () => {
@@ -224,6 +288,28 @@ export default function ChapterEditorShell(props: ChapterEditorShellProps) {
     },
   });
 
+  const resolveDiagnosticMutation = useMutation({
+    mutationFn: async (issueId: string) => resolveChapterAuditIssue(novelId, issueId),
+    onSuccess: async (_response, issueId) => {
+      if (chapter) {
+        queryClient.setQueryData<ApiResponse<ChapterEditorWorkspaceResponse>>(
+          queryKeys.novels.chapterEditorWorkspace(novelId, chapter.id),
+          (cached) => {
+            const card = cached?.data?.diagnosticCards.find((item) => item.sourceIssueId === issueId);
+            return cached?.data && card ? { ...cached, data: removeCompletedDiagnostic(cached.data, card) } : cached;
+          },
+        );
+      }
+      setSelectedDiagnosticId(null);
+      await invalidateChapterQueries();
+      onRefreshWorkspace?.();
+      toast.success("问题已标记为处理完成，重新分析后会确认正文状态。");
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : "问题状态更新失败，请稍后重试。");
+    },
+  });
+
   const previewMutation = useMutation({
     mutationFn: async (request: ReturnType<typeof buildAiRevisionRequest>) => {
       if (!chapter) {
@@ -240,6 +326,8 @@ export default function ChapterEditorShell(props: ChapterEditorShellProps) {
           : "正在生成修正方案";
       setSession((current) => ({
         ...current,
+        mode: "revision",
+        diagnosticCard: lastPreviewDiagnosticRef.current,
         status: "loading",
         requestLabel: label,
         customInstruction: request.instruction,
@@ -266,13 +354,15 @@ export default function ChapterEditorShell(props: ChapterEditorShellProps) {
       }
       setSession((current) => ({
         ...data,
+        mode: "revision",
         status: "ready",
         viewMode: "block",
+        activeCandidateId: data.activeCandidateId ?? data.candidates[0]?.id ?? null,
         requestLabel: current.requestLabel,
+        diagnosticCard: current.diagnosticCard,
         errorMessage: undefined,
       }));
       setSelection(null);
-      setSelectionToolbarPosition(null);
     },
     onError: (error) => {
       setSession((current) => ({
@@ -283,49 +373,128 @@ export default function ChapterEditorShell(props: ChapterEditorShellProps) {
     },
   });
 
-  const acceptMutation = useMutation({
-    mutationFn: async () => {
-      if (!chapter || !activeCandidate || !session.targetRange) {
-        throw new Error("当前没有可应用的候选版本。");
+  const continuationMutation = useMutation({
+    mutationFn: async (request: ChapterEditorCursorContinuationRequest) => {
+      if (!chapter) {
+        throw new Error("当前未选中章节。");
       }
-      const label = `chapter-editor:${chapter.order}:${session.scope}:${Date.now()}`;
-      const nextContent = applyCandidateToContent(contentDraft, session.targetRange, activeCandidate.content);
-      await createNovelSnapshot(novelId, {
-        triggerType: "manual",
-        label,
-      });
-      await updateNovelChapter(novelId, chapter.id, {
-        content: nextContent,
-      });
-      return nextContent;
+      return previewChapterCursorContinuation(novelId, chapter.id, request);
     },
-    onSuccess: async (nextContent) => {
-      setContentDraft(nextContent);
-      setSavedContent(nextContent);
-      setSaveStatus("saved");
-      setSession(EMPTY_SESSION);
-      setRevisionInstruction("");
-      await invalidateChapterQueries();
-      toast.success("已应用候选版本，并创建 AI 修改前快照。");
+    onMutate: (request) => {
+      lastContinuationRequestRef.current = request;
+      setSession((current) => ({
+        ...current,
+        mode: "continuation",
+        diagnosticCard: undefined,
+        status: "loading",
+        requestLabel: `正在生成${CHAPTER_EDITOR_CURSOR_OPERATION_LABELS[request.operation]}方案`,
+        continuationOperation: request.operation,
+        scope: "selection",
+        targetRange: {
+          from: request.cursorOffset,
+          to: request.cursorOffset,
+          text: "",
+        },
+        candidates: [],
+        activeCandidateId: null,
+        errorMessage: undefined,
+      }));
+    },
+    onSuccess: (response) => {
+      const data = response.data;
+      if (!data) {
+        setSession((current) => ({ ...current, status: "error", errorMessage: "AI 未返回续写结果，请重试。" }));
+        return;
+      }
+      setSession((current) => ({
+        ...current,
+        ...data,
+        mode: "continuation",
+        continuationOperation: data.operation,
+        status: "ready",
+        viewMode: "block",
+        activeCandidateId: data.activeCandidateId ?? data.candidates[0]?.id ?? null,
+        errorMessage: undefined,
+      }));
+      setSelection(null);
+      setCursorOffset(null);
     },
     onError: (error) => {
-      toast.error(error instanceof Error ? error.message : "应用候选版本失败。");
+      setSession((current) => ({
+        ...current,
+        status: "error",
+        errorMessage: error instanceof Error ? error.message : "AI 续写失败，请重试。",
+      }));
     },
   });
 
-  const previewPayload = session.status === "loading" && session.targetRange?.text
+  const review = useCandidateReview(session.sessionId ?? "", session.targetRange?.text ?? "", activeCandidate);
+  const acceptMutation = useCandidateAcceptance({
+    novelId, chapter, session, candidate: activeCandidate,
+    selectedChangeIds: review.selectedChangeIds,
+    content: contentDraft,
+    sourceSnapshot: session.mode === "continuation"
+      ? lastContinuationRequestRef.current?.contentSnapshot : lastPreviewRequestRef.current?.contentSnapshot,
+    savedUpdatedAt: draft.savedUpdatedAt,
+    savedContent: draft.savedContent,
+    acknowledgeSave: draft.acknowledgeSave,
+    onAccepted: async ({ nextContent, savedUpdatedAt, fullyAccepted }) => {
+      let completedCard = fullyAccepted ? session.diagnosticCard : undefined;
+      if (completedCard?.sourceIssueId) {
+        try {
+          const response = await resolveChapterAuditIssue(novelId, completedCard.sourceIssueId);
+          if (!response.success) throw new Error(response.error || "问题状态更新失败。");
+        } catch {
+          completedCard = undefined;
+          toast.error("正文已保存，但问题状态更新失败。请在问题卡中确认已处理。");
+        }
+      }
+      if (chapter && session.targetRange) {
+        queryClient.setQueryData<ApiResponse<ChapterEditorWorkspaceResponse>>(
+          queryKeys.novels.chapterEditorWorkspace(novelId, chapter.id),
+          (cached) => cached?.data ? {
+            ...cached,
+            data: applySavedRevisionToWorkspace(cached.data, {
+              previousUpdatedAt: draft.savedUpdatedAt,
+              savedUpdatedAt,
+              previousContent: contentDraft,
+              nextContent,
+              targetRange: session.targetRange!,
+              completedCard,
+            }),
+          } : cached,
+        );
+      }
+      setSaveStatus("saved");
+      setSession(EMPTY_SESSION);
+      setRevisionInstruction("");
+      setSelectedDiagnosticId(null);
+      await invalidateChapterQueries();
+      await props.onChapterSaved?.();
+      setLoadedSnapshotId(null);
+    },
+  });
+
+  const isBusy = saveMutation.isPending || previewMutation.isPending || continuationMutation.isPending
+    || acceptMutation.isPending || reviewMutation.isPending || resolveDiagnosticMutation.isPending;
+  useEffect(() => {
+    props.onEditingStateChange?.({ isDirty, isBusy, hasCandidate: session.status === "ready" });
+  }, [props.onEditingStateChange, isDirty, isBusy, session.status]);
+
+  const previewPayload = session.status === "loading" && session.targetRange
     ? {
       mode: "loading" as const,
       from: session.targetRange.from,
       to: session.targetRange.to,
       originalText: session.targetRange.text,
     }
-    : session.status === "ready" && activeCandidate && session.targetRange
+    : session.status === "ready" && activeCandidate && session.targetRange && !review.error
       ? {
         mode: session.viewMode,
         from: session.targetRange.from,
         to: session.targetRange.to,
         diffChunks: activeCandidate.diffChunks,
+        selectedChangeIds: review.selectedChangeIds,
         originalText: session.targetRange.text,
         candidateText: activeCandidate.content,
       }
@@ -357,8 +526,13 @@ export default function ChapterEditorShell(props: ChapterEditorShellProps) {
       instruction?: string;
       selectionOverride?: ChapterEditorSelectionRange | null;
       task?: ChapterEditorRecommendedTask | null;
+      diagnosticCard?: ChapterEditorDiagnosticCard;
     },
   ) => {
+    if (isBusy || session.status !== "idle") {
+      toast.error("请先完成或拒绝当前候选，再处理其他问题。");
+      return;
+    }
     const resolvedSelection = scope === "selection"
       ? getSelectionTarget(options?.selectionOverride, options?.task)
       : null;
@@ -368,17 +542,30 @@ export default function ChapterEditorShell(props: ChapterEditorShellProps) {
       return;
     }
 
+    const selectedCardMatches = selectedDiagnosticCard?.anchorRange && resolvedSelection
+      && selectedDiagnosticCard.anchorRange.from === resolvedSelection.from
+      && selectedDiagnosticCard.anchorRange.to === resolvedSelection.to;
+    const diagnosticCard = options?.diagnosticCard ?? (selectedCardMatches ? selectedDiagnosticCard! : undefined);
     const request = buildAiRevisionRequest({
       source,
       scope,
       presetOperation: options?.presetOperation,
       instruction: options?.instruction,
+      repairBrief: diagnosticCard ? {
+        title: diagnosticCard.title,
+        problemSummary: diagnosticCard.problemSummary,
+        whyItMatters: diagnosticCard.whyItMatters,
+        repairGoal: diagnosticCard.repairGoal,
+        repairApproach: diagnosticCard.repairApproach,
+        mustPreserve: diagnosticCard.mustPreserve,
+      } : undefined,
       selection: resolvedSelection,
       content: contentDraft,
       provider: llm.provider,
       model: llm.model,
       temperature: llm.temperature,
     });
+    lastPreviewDiagnosticRef.current = diagnosticCard;
     previewMutation.mutate(request);
   };
 
@@ -394,7 +581,39 @@ export default function ChapterEditorShell(props: ChapterEditorShellProps) {
     );
   };
 
+  const handleRunCursorOperation = (operation: ChapterEditorCursorOperation, instruction?: string) => {
+    if (isBusy || session.status !== "idle") {
+      toast.error("请先完成当前操作，再生成续写候选。");
+      return;
+    }
+    if (cursorOffset === null) {
+      toast.error("请先把光标放在正文中，再选择续写方向。");
+      return;
+    }
+    const normalizedContent = normalizeChapterContent(contentDraft);
+    const cursorRange: ChapterEditorSelectionRange = {
+      from: cursorOffset,
+      to: cursorOffset,
+      text: "",
+    };
+    const request: ChapterEditorCursorContinuationRequest = {
+      operation,
+      contentSnapshot: normalizedContent,
+      cursorOffset,
+      context: getParagraphWindow(normalizedContent, cursorRange),
+      instruction: instruction?.trim() || undefined,
+      provider: llm.provider,
+      model: llm.model,
+      temperature: llm.temperature,
+    };
+    continuationMutation.mutate(request);
+  };
+
   const handleRegenerate = () => {
+    if (session.mode === "continuation" && lastContinuationRequestRef.current) {
+      continuationMutation.mutate(lastContinuationRequestRef.current);
+      return;
+    }
     if (!lastPreviewRequestRef.current) {
       return;
     }
@@ -405,39 +624,61 @@ export default function ChapterEditorShell(props: ChapterEditorShellProps) {
     setSession(EMPTY_SESSION);
   };
 
+  const handleLoadSnapshotContent = (content: string, snapshotId: string) => {
+    draft.setContentDraft(content);
+    setLoadedSnapshotId(snapshotId);
+    setSaveStatus("idle");
+    setSession(EMPTY_SESSION);
+    setSelection(null);
+    setCursorOffset(null);
+    setSelectedDiagnosticId(null);
+  };
+
   const handleFocusDiagnostic = (card: ChapterEditorDiagnosticCard) => {
+    if (isBusy || session.status !== "idle") return;
+    setFocusRequestKey(0);
     if (selectedDiagnosticId === card.id) {
       setSelectedDiagnosticId(null);
       return;
     }
     setSelectedDiagnosticId(card.id);
+    setRevisionScope(card.recommendedScope);
     setSelection(null);
-    setSelectionToolbarPosition(null);
+    setCursorOffset(null);
   };
 
   const handleRunDiagnostic = (card: ChapterEditorDiagnosticCard) => {
-    setSelectedDiagnosticId(card.id);
+    if (isBusy || session.status !== "idle") return;
+    if (contentDraft !== savedContent || workspace?.chapterMeta.updatedAt !== draft.savedUpdatedAt) {
+      toast.error("正文已变化，请先保存并重新分析本章，确认问题位置。");
+      return;
+    }
+    const target = toSelectionFromRange(contentDraft, card.anchorRange ?? null);
+    if (card.recommendedScope === "selection" && !target) {
+      toast.error("问题卡的正文位置需要重新确认，请重新分析本章后再处理。");
+      return;
+    }
+    flushSync(() => {
+      setSelectedDiagnosticId(card.id);
+      setSelection(target ?? toSelectionFromRange(contentDraft, { from: 0, to: contentDraft.length }));
+      setCursorOffset(null);
+      setRevisionScope(card.recommendedScope);
+      setFocusRequestKey((current) => current + 1);
+    });
     runRevision("preset", card.recommendedScope, {
       presetOperation: card.recommendedAction,
-      selectionOverride: toSelectionFromRange(contentDraft, card.anchorRange ?? null),
+      selectionOverride: target,
+      diagnosticCard: card,
+      instruction: revisionInstruction.trim() || undefined,
     });
   };
 
-  const handleRunRecommended = () => {
-    if (!workspace?.recommendedTask) {
-      return;
-    }
-    runRevision("preset", workspace.recommendedTask.recommendedScope, {
-      presetOperation: workspace.recommendedTask.recommendedAction,
-      task: workspace.recommendedTask,
-    });
-  };
 
   const handleRunSelectedDiagnostic = () => {
-    if (!selectedDiagnosticCard) {
+    if (!assistantDiagnosticCard) {
       return;
     }
-    handleRunDiagnostic(selectedDiagnosticCard);
+    handleRunDiagnostic(assistantDiagnosticCard);
   };
 
   const handleRunFreeform = () => {
@@ -446,17 +687,12 @@ export default function ChapterEditorShell(props: ChapterEditorShellProps) {
     });
   };
 
-  const currentTargetDescription = revisionScope === "chapter"
-    ? "整章正文"
-    : selection
-      ? "你手动选中的正文片段"
-      : selectedDiagnosticCard?.paragraphLabel
-        ? `${selectedDiagnosticCard.paragraphLabel} 对应片段`
-        : workspace?.recommendedTask?.paragraphLabel
-          ? `${workspace.recommendedTask.paragraphLabel} 对应片段`
-          : "尚未选中片段";
   const canRunSelectionRevision = Boolean(getSelectionTarget());
   const headerSaveLabel = getSaveStatusLabel(saveStatus, isDirty);
+  const cursorParagraph = cursorOffset !== null
+    ? getParagraphIndicesForRange(contentDraft, { from: cursorOffset, to: cursorOffset })
+    : null;
+  const cursorTargetLabel = cursorParagraph ? `第 ${cursorParagraph.startIndex + 1} 段的光标处` : "正文光标处";
   const gridClassName = "xl:grid-cols-[320px_minmax(0,1fr)_400px]";
 
   return (
@@ -487,79 +723,131 @@ export default function ChapterEditorShell(props: ChapterEditorShellProps) {
           </Button>
         </div>
       ) : null}
-      <div className={`grid min-h-0 flex-1 gap-4 overflow-hidden ${gridClassName}`}>
-        <ChapterEditorSidebar
-          chapter={chapter}
-          workspace={workspace}
-          workspaceStatus={workspaceStatus}
-          wordCount={wordCount}
-          saveStatusLabel={headerSaveLabel}
-          isDirty={isDirty}
-          isSaving={saveMutation.isPending}
-          selectedDiagnosticId={selectedDiagnosticId}
-          onBack={onBack}
-          onOpenVersionHistory={onOpenVersionHistory}
-          onSave={() => saveMutation.mutate(contentDraft)}
-          onFocusDiagnostic={handleFocusDiagnostic}
-          onRunDiagnostic={handleRunDiagnostic}
-        />
+      {(restored || hasExternalChange || storageError) ? (
+        <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950">
+          <span>{storageError ? "浏览器暂时无法保存本地草稿，请尽快保存到作品。" : hasExternalChange ? "本章已有新的保存版本，你的草稿仍保留。" : "已恢复未保存的正文草稿。"}</span>
+          {hasExternalChange ? <Button size="sm" variant="outline" onClick={draft.loadSavedVersion}>加载新保存版本</Button> : null}
+        </div>
+      ) : null}
+      <div className={`grid min-h-0 flex-1 gap-4 overflow-y-auto xl:overflow-hidden ${gridClassName}`}>
+        <div className="order-1 min-h-0 overflow-y-auto xl:order-none">
+          <ChapterEditorSidebar
+            chapter={chapter}
+            workspace={workspace}
+            workspaceStatus={workspaceStatus}
+            wordCount={wordCount}
+            saveStatusLabel={headerSaveLabel}
+            isDirty={isDirty}
+            isSaving={saveMutation.isPending}
+            selectedDiagnosticId={selectedDiagnosticId}
+            onBack={onBack ? () => leaveEditor(onBack) : undefined}
+            backLabel={props.backLabel}
+            onOpenChapterVersions={() => setIsVersionDrawerOpen(true)}
+            onOpenVersionHistory={onOpenVersionHistory ? () => leaveEditor(onOpenVersionHistory) : undefined}
+            onRefreshWorkspace={onRefreshWorkspace}
+            isRefreshingWorkspace={isRefreshingWorkspace}
+            onSave={() => saveMutation.mutate(contentDraft)}
+            onFocusDiagnostic={handleFocusDiagnostic}
+            onRunDiagnostic={handleRunDiagnostic}
+            onResolveDiagnostic={(card) => {
+              if (card.sourceIssueId) {
+                resolveDiagnosticMutation.mutate(card.sourceIssueId);
+              }
+            }}
+            isResolvingDiagnostic={resolveDiagnosticMutation.isPending}
+            diagnosticsDisabled={isBusy || session.status !== "idle"}
+          />
+        </div>
 
-        <div className="relative min-h-0 overflow-hidden">
+        <div className="relative order-3 min-h-0 overflow-hidden xl:order-none">
           <ChapterTextEditor
             value={contentDraft}
             readOnly={session.status !== "idle"}
             onChange={(next) => {
-              setContentDraft(next);
+              draft.setContentDraft(next);
               setSaveStatus("idle");
             }}
-            onSelectionChange={(nextSelection, position) => {
+            onSelectionChange={(nextSelection) => {
               setSelection(nextSelection);
-              setSelectionToolbarPosition(position);
               if (nextSelection) {
+                setRevisionScope("selection");
+                setFocusRequestKey(0);
+                setCursorOffset(null);
+                setSelectedDiagnosticId(null);
+              }
+            }}
+            onCursorChange={(offset) => {
+              setCursorOffset(offset);
+              if (offset !== null) {
+                setRevisionScope("selection");
+                setFocusRequestKey(0);
+                setSelection(null);
                 setSelectedDiagnosticId(null);
               }
             }}
             preview={previewPayload}
+            focusRequestKey={focusRequestKey}
             focusRange={session.status === "idle"
               ? selection
                 ? { from: selection.from, to: selection.to }
                 : selectedDiagnosticCard?.anchorRange ?? null
               : null}
           />
-          <SelectionAIFloatingToolbar
-            visible={Boolean(selection && session.status === "idle")}
-            position={selectionToolbarPosition}
-            disabled={previewMutation.isPending}
-            onRunOperation={handleRunOperation}
-          />
         </div>
 
-        <div className="min-h-0 overflow-hidden">
-          <ChapterEditorDirectorPanel
-            workspace={workspace}
-            workspaceStatus={workspaceStatus}
-            selectedDiagnosticCard={selectedDiagnosticCard}
-            session={session}
-            activeCandidate={activeCandidate}
-            revisionScope={revisionScope}
-            revisionInstruction={revisionInstruction}
-            canRunSelectionRevision={canRunSelectionRevision}
-            currentTargetDescription={currentTargetDescription}
-            isGenerating={previewMutation.isPending}
-            isApplying={acceptMutation.isPending}
-            onInstructionChange={setRevisionInstruction}
-            onScopeChange={setRevisionScope}
-            onRunRecommended={handleRunRecommended}
-            onRunSelectedDiagnostic={handleRunSelectedDiagnostic}
-            onRunFreeform={handleRunFreeform}
-            onSelectCandidate={(candidateId) => setSession((current) => ({ ...current, activeCandidateId: candidateId }))}
-            onChangeViewMode={(mode) => setSession((current) => ({ ...current, viewMode: mode }))}
-            onAccept={() => acceptMutation.mutate()}
-            onReject={handleReject}
-            onRegenerate={handleRegenerate}
-          />
+        <div className="order-2 min-h-0 overflow-hidden xl:order-none">
+            <ChapterEditorDirectorPanel
+              workspace={workspace}
+              workspaceStatus={workspaceStatus}
+              selectedDiagnosticCard={assistantDiagnosticCard}
+              actionContext={actionContext}
+              cursorTargetDescription={cursorTargetLabel}
+              selectionTargetDescription={selection ? `已选中 ${countEditorWords(selection.text)} 字` : ""}
+              session={session}
+              activeCandidate={activeCandidate}
+              diffChanges={review.changes}
+              selectedDiffChangeIds={review.selectedChangeIds}
+              reviewError={review.error}
+              hasSelectedChanges={review.resultText !== session.targetRange?.text}
+              revisionScope={revisionScope}
+              revisionInstruction={revisionInstruction}
+              canRunSelectionRevision={canRunSelectionRevision}
+              isGenerating={isBusy}
+              isApplying={acceptMutation.isPending}
+              onInstructionChange={setRevisionInstruction}
+              onScopeChange={(scope) => {
+                setRevisionScope(scope);
+                if (scope === "chapter") {
+                  setSelection(null);
+                  setCursorOffset(null);
+                  setSelectedDiagnosticId(null);
+                  setFocusRequestKey(0);
+                }
+              }}
+              onRunCursorOperation={(operation) => handleRunCursorOperation(operation, revisionInstruction)}
+              onRunSelectionOperation={(operation) => handleRunOperation(operation, revisionInstruction.trim() || undefined)}
+              onRunSelectedDiagnostic={handleRunSelectedDiagnostic}
+              onRunFreeform={handleRunFreeform}
+              onSelectCandidate={(candidateId) => setSession((current) => ({ ...current, activeCandidateId: candidateId }))}
+              onSelectAllChanges={review.selectAll}
+              onToggleDiffChange={review.toggleChange}
+              onChangeViewMode={(mode) => setSession((current) => ({ ...current, viewMode: mode }))}
+              onAccept={() => acceptMutation.mutate()}
+              onReject={handleReject}
+              onRegenerate={handleRegenerate}
+            />
         </div>
       </div>
+      <ChapterVersionDrawer
+        novelId={novelId}
+        chapterId={chapter.id}
+        chapterTitle={chapter.title}
+        open={isVersionDrawerOpen}
+        onOpenChange={setIsVersionDrawerOpen}
+        currentContent={contentDraft}
+        isDirty={isDirty}
+        onLoadContent={handleLoadSnapshotContent}
+      />
     </div>
   );
 }

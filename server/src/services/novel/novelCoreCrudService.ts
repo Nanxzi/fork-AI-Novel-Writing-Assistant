@@ -8,7 +8,7 @@ import { NovelWorkflowService } from "./workflow/NovelWorkflowService";
 import { NovelContinuationService } from "./NovelContinuationService";
 import { NovelVolumeService } from "./volume/NovelVolumeService";
 import { STORY_WORLD_SLICE_SCHEMA_VERSION } from "./storyWorldSlice/storyWorldSlicePersistence";
-import { syncChapterArtifacts } from "./novelChapterArtifacts";
+import { queueManualChapterSync } from "./chapterEditor/synchronization";
 import { listNovelTokenUsageByNovelIds } from "./novelTokenUsageSummary";
 import { toImageAsset } from "../image/imageGenerationMappers";
 import {
@@ -23,6 +23,7 @@ import {
   UpdateNovelInput,
 } from "./novelCoreShared";
 import { queueRagDelete, queueRagUpsert } from "./novelCoreSupport";
+import { novelEventBus } from "../../events";
 
 export class NovelCoreCrudService {
   private readonly novelContinuationService = new NovelContinuationService();
@@ -235,7 +236,6 @@ export class NovelCoreCrudService {
 
   private async listLatestVisibleAutoDirectorTasksByNovelIds(
     novelIds: string[],
-    allowHealing = false,
   ): Promise<Map<string, NovelAutoDirectorTaskSummary>> {
     const uniqueNovelIds = Array.from(new Set(novelIds.filter((id) => id.trim().length > 0)));
     if (uniqueNovelIds.length === 0) {
@@ -274,15 +274,6 @@ export class NovelCoreCrudService {
 
     if (rows.length === 0) {
       return new Map();
-    }
-
-    if (allowHealing) {
-      const healed = await Promise.all(
-        rows.map((row) => this.workflowService.healAutoDirectorTaskState(row.id, row)),
-      );
-      if (healed.some(Boolean)) {
-        return this.listLatestVisibleAutoDirectorTasksByNovelIds(uniqueNovelIds, false);
-      }
     }
 
     const archivedTaskIds = await getArchivedTaskIdSet("novel_workflow", rows.map((row) => row.id));
@@ -365,7 +356,9 @@ export class NovelCoreCrudService {
 
     const created = await prisma.novel.create({
       data: {
+        id: input.id,
         title: input.title,
+        directorVersion: input.directorVersion,
         description: input.description,
         targetAudience: normalizeOptionalTextForCreate(input.targetAudience),
         bookSellingPoint: normalizeOptionalTextForCreate(input.bookSellingPoint),
@@ -405,6 +398,8 @@ export class NovelCoreCrudService {
             : null,
         referenceBookAnalysisId,
         referenceBookAnalysisSections: referenceBookAnalysisId ? referenceBookAnalysisSections : null,
+        creativeCarryoverContractJson: input.creativeCarryoverContractJson ?? null,
+        creativeCarryoverContractSchemaVersion: input.creativeCarryoverContractSchemaVersion ?? null,
       },
     });
 
@@ -557,13 +552,70 @@ export class NovelCoreCrudService {
     if (updated.worldId) {
       queueRagUpsert("world", updated.worldId);
     }
+    void novelEventBus.emit({
+      type: "novel:updated",
+      payload: { novelId: id, fields: Object.keys(input) },
+    }).catch(() => {});
     return normalizeNovelOutput(updated);
   }
 
   async deleteNovel(id: string) {
+    await prisma.$transaction(async (transaction) => {
+      const [failedWorkflowTasks, failedAgentRuns, failedPipelineJobs, failedImageTasks] = await Promise.all([
+        transaction.novelWorkflowTask.findMany({
+          where: { novelId: id, status: "failed" },
+          select: { id: true },
+        }),
+        transaction.agentRun.findMany({
+          where: { novelId: id, status: "failed" },
+          select: { id: true },
+        }),
+        transaction.generationJob.findMany({
+          where: { novelId: id, status: "failed" },
+          select: { id: true },
+        }),
+        transaction.imageGenerationTask.findMany({
+          where: { novelId: id, status: "failed" },
+          select: { id: true },
+        }),
+      ]);
+      const failedWorkflowTaskIds = failedWorkflowTasks.map((task) => task.id);
+      const failedAgentRunIds = failedAgentRuns.map((task) => task.id);
+      const failedPipelineJobIds = failedPipelineJobs.map((task) => task.id);
+      const failedImageTaskIds = failedImageTasks.map((task) => task.id);
+
+      if (
+        failedWorkflowTaskIds.length > 0
+        || failedAgentRunIds.length > 0
+        || failedPipelineJobIds.length > 0
+        || failedImageTaskIds.length > 0
+      ) {
+        await transaction.taskCenterArchive.deleteMany({
+          where: {
+            OR: [
+              { taskKind: "novel_workflow", taskId: { in: failedWorkflowTaskIds } },
+              { taskKind: "agent_run", taskId: { in: failedAgentRunIds } },
+              { taskKind: "novel_pipeline", taskId: { in: failedPipelineJobIds } },
+              { taskKind: "image_generation", taskId: { in: failedImageTaskIds } },
+            ],
+          },
+        });
+      }
+      if (failedWorkflowTaskIds.length > 0) {
+        await transaction.novelWorkflowTask.deleteMany({
+          where: { id: { in: failedWorkflowTaskIds } },
+        });
+      }
+      if (failedAgentRunIds.length > 0) {
+        await transaction.agentRun.deleteMany({
+          where: { id: { in: failedAgentRunIds } },
+        });
+      }
+
+      await transaction.novel.delete({ where: { id } });
+    });
     queueRagDelete("novel", id);
     queueRagDelete("bible", id);
-    await prisma.novel.delete({ where: { id } });
   }
 
   async listChapters(novelId: string) {
@@ -575,33 +627,34 @@ export class NovelCoreCrudService {
   }
 
   async createChapter(novelId: string, input: ChapterInput) {
-    const chapter = await prisma.chapter.create({
-      data: {
-        novelId,
-        title: input.title,
-        order: input.order,
-        content: input.content ?? "",
-        expectation: input.expectation,
-        chapterStatus: input.chapterStatus,
-        targetWordCount: input.targetWordCount ?? null,
-        conflictLevel: input.conflictLevel ?? null,
-        revealLevel: input.revealLevel ?? null,
-        mustAvoid: input.mustAvoid ?? null,
-        taskSheet: input.taskSheet ?? null,
-        sceneCards: input.sceneCards ?? null,
-        repairHistory: input.repairHistory ?? null,
-        qualityScore: input.qualityScore ?? null,
-        continuityScore: input.continuityScore ?? null,
-        characterScore: input.characterScore ?? null,
-        pacingScore: input.pacingScore ?? null,
-        riskFlags: input.riskFlags ?? null,
-        generationState: "planned",
-      },
-    });
+    const chapter = await prisma.$transaction(async tx => {
+      const saved = await tx.chapter.create({
+        data: {
+          novelId,
+          title: input.title,
+          order: input.order,
+          content: input.content ?? "",
+          expectation: input.expectation,
+          chapterStatus: input.chapterStatus,
+          targetWordCount: input.targetWordCount ?? null,
+          conflictLevel: input.conflictLevel ?? null,
+          revealLevel: input.revealLevel ?? null,
+          mustAvoid: input.mustAvoid ?? null,
+          taskSheet: input.taskSheet ?? null,
+          sceneCards: input.sceneCards ?? null,
+          repairHistory: input.repairHistory ?? null,
+          qualityScore: input.qualityScore ?? null,
+          continuityScore: input.continuityScore ?? null,
+          characterScore: input.characterScore ?? null,
+          pacingScore: input.pacingScore ?? null,
+          riskFlags: input.riskFlags ?? null,
+          generationState: "planned",
+        },
+      });
 
-    if (chapter.content) {
-      await syncChapterArtifacts(novelId, chapter.id, chapter.content);
-    }
+      if (saved.content) await queueManualChapterSync(tx, saved);
+      return saved;
+    });
     await this.volumeService.mirrorChapterIntoWorkspace(novelId, {
       id: chapter.id,
       order: chapter.order,
@@ -619,37 +672,50 @@ export class NovelCoreCrudService {
   }
 
   async updateChapter(novelId: string, chapterId: string, input: Partial<ChapterInput>) {
-    const exists = await prisma.chapter.findFirst({ where: { id: chapterId, novelId }, select: { id: true } });
+    const exists = await prisma.chapter.findFirst({ where: { id: chapterId, novelId }, select: { id: true, content: true, updatedAt: true } });
     if (!exists) {
       throw new Error("章节不存在");
     }
-
-    const chapter = await prisma.chapter.update({
-      where: { id: chapterId },
-      data: {
-        title: input.title,
-        order: input.order,
-        content: input.content,
-        expectation: input.expectation,
-        chapterStatus: input.chapterStatus,
-        targetWordCount: input.targetWordCount,
-        conflictLevel: input.conflictLevel,
-        revealLevel: input.revealLevel,
-        mustAvoid: input.mustAvoid,
-        taskSheet: input.taskSheet,
-        sceneCards: input.sceneCards,
-        repairHistory: input.repairHistory,
-        qualityScore: input.qualityScore,
-        continuityScore: input.continuityScore,
-        characterScore: input.characterScore,
-        pacingScore: input.pacingScore,
-        riskFlags: input.riskFlags,
-      },
-    });
-
-    if (typeof input.content === "string") {
-      await syncChapterArtifacts(novelId, chapterId, input.content);
+    const bodyOnly = typeof input.content === "string" && input.expectedContent !== undefined
+      && Object.keys(input).every(key => ["content", "expectedContent", "expectedUpdatedAt"].includes(key));
+    const sameBody = (exists.content ?? "").replace(/\r\n?/g, "\n") === (input.expectedContent ?? "").replace(/\r\n?/g, "\n");
+    if ((bodyOnly && !sameBody) || (!bodyOnly && input.expectedUpdatedAt && exists.updatedAt.getTime() !== new Date(input.expectedUpdatedAt).getTime())) {
+      throw new AppError("本章保存版本已变化。请先查看新内容，再合并你的修改。", 409);
     }
+
+    const chapter = await prisma.$transaction(async tx => {
+      const saved = await tx.chapter.update({
+        where: { id: chapterId, novelId, ...(bodyOnly ? {content: exists.content} : {updatedAt: exists.updatedAt}) },
+        data: {
+          updatedAt: new Date(Math.max(Date.now(), exists.updatedAt.getTime() + 1)),
+          title: input.title,
+          order: input.order,
+          content: input.content,
+          expectation: input.expectation,
+          chapterStatus: input.chapterStatus,
+          targetWordCount: input.targetWordCount,
+          conflictLevel: input.conflictLevel,
+          revealLevel: input.revealLevel,
+          mustAvoid: input.mustAvoid,
+          taskSheet: input.taskSheet,
+          sceneCards: input.sceneCards,
+          repairHistory: input.repairHistory,
+          qualityScore: input.qualityScore,
+          continuityScore: input.continuityScore,
+          characterScore: input.characterScore,
+          pacingScore: input.pacingScore,
+          riskFlags: input.riskFlags,
+        },
+      });
+
+      if (typeof input.content === "string" && input.content !== exists.content) await queueManualChapterSync(tx, saved);
+      return saved;
+    }).catch((error: unknown) => {
+      if (error && typeof error === "object" && "code" in error && error.code === "P2025") {
+        throw new AppError("本章保存版本已变化。请先查看新内容，再合并你的修改。", 409);
+      }
+      throw error;
+    });
     await this.volumeService.mirrorChapterIntoWorkspace(novelId, {
       id: chapter.id,
       order: chapter.order,

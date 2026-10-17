@@ -219,6 +219,8 @@ export const chapterSchema = z.object({
 });
 
 export const updateChapterSchema = z.object({
+  expectedUpdatedAt: z.iso.datetime().optional(),
+  expectedContent: z.string().nullable().optional(),
   title: z.string().trim().min(1).optional(),
   order: z.number().int().nonnegative().optional(),
   content: z.string().optional(),
@@ -496,6 +498,14 @@ export const aiRevisionPreviewSchema = z.object({
   scope: z.enum(["selection", "chapter"]),
   presetOperation: z.enum(["polish", "expand", "compress", "emotion", "conflict", "custom"]).optional(),
   instruction: z.string().trim().max(800).optional(),
+  repairBrief: z.object({
+    title: z.string().trim().min(1).max(120),
+    problemSummary: z.string().trim().min(1).max(1000),
+    whyItMatters: z.string().trim().min(1).max(1000),
+    repairGoal: z.string().trim().min(1).max(1000).optional(),
+    repairApproach: z.string().trim().min(1).max(1000).optional(),
+    mustPreserve: z.array(z.string().trim().min(1).max(400)).max(8).optional(),
+  }).optional(),
   contentSnapshot: z.string(),
   selection: z.object({
     from: z.number().int().min(0),
@@ -547,6 +557,20 @@ export const aiRevisionPreviewSchema = z.object({
       message: "片段修正必须提供上下文窗口。",
     });
   }
+});
+
+export const cursorContinuationPreviewSchema = z.object({
+  operation: z.enum(["continue", "transition", "dialogue", "description", "inner_thought", "conflict"]),
+  contentSnapshot: z.string(),
+  cursorOffset: z.number().int().min(0),
+  context: z.object({
+    beforeParagraphs: z.array(z.string()).max(3),
+    afterParagraphs: z.array(z.string()).max(2),
+  }),
+  instruction: z.string().trim().max(800).optional(),
+  provider: llmProviderSchema.optional(),
+  model: z.string().trim().max(120).optional(),
+  temperature: z.number().min(0).max(2).optional(),
 });
 
 export const chapterExecutionContractSchema = chapterRuntimeRequestSchema;

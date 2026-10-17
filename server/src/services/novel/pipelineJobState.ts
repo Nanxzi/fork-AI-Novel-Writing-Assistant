@@ -1,4 +1,5 @@
 import type { PipelineJobStatus } from "@ai-novel/shared/types/novel";
+import { styleSignalPolicySchema } from "@ai-novel/shared/types/styleEngine";
 import type {
   PipelineBackgroundSyncActivity,
   PipelineBackgroundSyncKind,
@@ -7,6 +8,7 @@ import type {
 } from "./novelCoreShared";
 import type { NovelControlPolicy } from "@ai-novel/shared/types/canonicalState";
 import { directorIssuePolicySchema } from "@ai-novel/shared/types/directorIssue";
+import { parsePipelineDirectorSnapshot, InvalidPipelineDirectorSnapshotError } from "./production/directorBridge";
 
 const PIPELINE_ACTIVE_STAGES = ["queued", "generating_chapters", "reviewing", "repairing", "finalizing"] as const;
 const PIPELINE_STAGE_PROGRESS = {
@@ -228,6 +230,7 @@ export function parsePipelinePayload(payload: string | null | undefined): Pipeli
     const parsed = JSON.parse(payload) as Record<string, unknown>;
     return {
       provider: typeof parsed.provider === "string" ? (parsed.provider as PipelinePayload["provider"]) : undefined,
+      directorNext: parsePipelineDirectorSnapshot(parsed.directorNext),
       model: typeof parsed.model === "string" ? parsed.model : undefined,
       temperature: typeof parsed.temperature === "number" ? parsed.temperature : undefined,
       workflowTaskId: typeof parsed.workflowTaskId === "string" ? parsed.workflowTaskId : undefined,
@@ -251,12 +254,14 @@ export function parsePipelinePayload(payload: string | null | undefined): Pipeli
       controlPolicy: normalizeControlPolicy(parsed.controlPolicy),
       issueGovernanceVersion: parsed.issueGovernanceVersion === 1 ? 1 : undefined,
       issuePolicySnapshot: normalizeIssuePolicy(parsed.issuePolicySnapshot),
+      styleSignalPolicy: styleSignalPolicySchema.safeParse(parsed.styleSignalPolicy).data,
       qualityAlertDetails: normalizeStringList(parsed.qualityAlertDetails ?? parsed.failedDetails),
       replanAlertDetails: normalizeStringList(parsed.replanAlertDetails),
       recoverableRepairDetails: normalizeStringList(parsed.recoverableRepairDetails),
       backgroundSync: normalizePipelineBackgroundSync(parsed.backgroundSync),
     };
-  } catch {
+  } catch (error) {
+    if (error instanceof InvalidPipelineDirectorSnapshotError) throw error;
     return {};
   }
 }
@@ -267,6 +272,8 @@ export function stringifyPipelinePayload(input: PipelinePayload): string {
   const recoverableRepairDetails = normalizeStringList(input.recoverableRepairDetails) ?? [];
   const backgroundSync = normalizePipelineBackgroundSync(input.backgroundSync);
   return JSON.stringify({
+    ...(input.directorNext ? {directorNext: parsePipelineDirectorSnapshot(input.directorNext)} : {}),
+    ...(input.styleSignalPolicy ? { styleSignalPolicy: styleSignalPolicySchema.parse(input.styleSignalPolicy) } : {}),
     provider: input.provider ?? "deepseek",
     model: input.model ?? "",
     temperature: input.temperature ?? 0.8,

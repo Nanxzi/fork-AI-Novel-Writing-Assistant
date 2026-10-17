@@ -18,11 +18,15 @@ export async function applyChapterQualityClosure(input: {
   jobId: string;
   chapter: { id: string; order: number };
   chapterResult: ChapterPipelineResult;
+  /** A saved author revision also needs degraded closure if acceptance is unavailable. */
+  authorRevision?: boolean;
   qualityThreshold: number;
   runtimePayload: PipelinePayload;
   qualityAlertDetails: string[];
   replanAlertDetails: string[];
   recoverableRepairDetails: string[];
+  onIssueDecision?: (decision: DirectorIssueDecision) => void;
+  beforeFuturePlanning?: () => Promise<void>;
   runLocalReplan: (input: {
     chapterId: string;
     triggerType: string;
@@ -44,6 +48,7 @@ export async function applyChapterQualityClosure(input: {
   let shouldStopAfterCurrentChapter = false;
   let stopAction: ChapterQualityStopAction | null = null;
   const applyDecision = async (decision: DirectorIssueDecision) => {
+    input.onIssueDecision?.(decision);
     if (decision.action === "auto_retry") {
       throw new Error("章节质量闭环已耗尽本章自动处理预算，不能登记未执行的自动重试。");
     }
@@ -107,6 +112,8 @@ export async function applyChapterQualityClosure(input: {
 
   if (chapterResult.reviewExecuted) {
     await createQualityReport(input.novelId, chapter.id, final.score, final.issues);
+  }
+  if (chapterResult.reviewExecuted || input.authorRevision) {
     await chapterQualityLoopService.recordAssessment({
       novelId: input.novelId,
       chapterId: chapter.id,
@@ -118,6 +125,7 @@ export async function applyChapterQualityClosure(input: {
       terminalAction: qualityDebtTerminalAction,
       taskId: input.workflowTaskId,
       qualityDebtAttribution: chapterResult.qualityDebtAttribution ?? null,
+      repairSelection: chapterResult.repairSelection ?? null,
     }).catch((error) => {
       logPipelineError("记录章节质量闭环状态失败", {
         jobId: input.jobId,
@@ -152,6 +160,7 @@ export async function applyChapterQualityClosure(input: {
         coherence: final.score.coherence,
         repetition: final.score.repetition,
         engagement: final.score.engagement,
+        overall: final.score.overall,
       },
       hasUsableOutput: true,
       provider: runtimePayload.provider,
@@ -160,6 +169,10 @@ export async function applyChapterQualityClosure(input: {
       applyAction: applyDecision,
     });
   }
+
+  // Quality facts must survive a saved-boundary safety pause. This callback may
+  // stop execution, but must run before any future-chapter model invocation.
+  await input.beforeFuturePlanning?.();
 
   if (shouldStopAfterCurrentChapter) {
     return { shouldStopAfterCurrentChapter: true, stopAction };
@@ -229,7 +242,8 @@ export async function applyChapterQualityClosure(input: {
     provider: runtimePayload.provider,
     model: runtimePayload.model,
     temperature: runtimePayload.temperature,
-    applyAction: async () => {
+    applyAction: async decision => {
+      input.onIssueDecision?.(decision);
       if (!input.replanAlertDetails.includes(detail)) input.replanAlertDetails.push(detail);
     },
   });

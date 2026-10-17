@@ -12,9 +12,13 @@ import type {
 import type { LLMProvider } from "./llm";
 import type { ArtifactSyncMode } from "./novel";
 import type { BookAnalysisSectionKey } from "./bookAnalysis";
+import type { CreativeCarryoverContract } from "./creativeCarryoverContract";
 import type { NovelWorkflowResumeTarget, NovelWorkflowStage } from "./novelWorkflow";
 import type { WritingPlatformPreference } from "./writingPlatform";
-import type { NovelCreateResourceRecommendation } from "./novelResourceRecommendation";
+import type {
+  NovelCreateResourceRecommendation,
+  PowerSystemPreference,
+} from "./novelResourceRecommendation";
 import type { StoryMacroPlan } from "./storyMacro";
 import type { BookContract, BookContractDraft } from "./novelWorkflow";
 import type { TitleFactorySuggestion } from "./title";
@@ -23,6 +27,7 @@ import type { StyleIntentSummary } from "./styleEngine";
 import type { DirectorAutoApprovalConfig } from "./autoDirectorApproval";
 import type { DirectorIssuePolicy } from "./directorIssue";
 import type { DirectorRiskAssessment } from "./directorRisk";
+import type {DirectorVersion} from "./director/version";
 
 export const DIRECTOR_CORRECTION_PRESETS = [
   {
@@ -237,6 +242,13 @@ export function isFullBookAutopilotRunMode(
   runMode: DirectorRunMode | string | null | undefined,
 ): runMode is typeof DIRECTOR_FULL_BOOK_AUTOPILOT_RUN_MODE {
   return runMode === DIRECTOR_FULL_BOOK_AUTOPILOT_RUN_MODE;
+}
+
+/** Frozen mode permission shared by scheduling and persisted resource authority. */
+export function canAutomaticallyReviewDirectorResources(
+  runMode: DirectorRunMode | string | null | undefined,
+): boolean {
+  return isFullBookAutopilotRunMode(runMode);
 }
 
 export function buildFullBookAutopilotExecutionPlan(): DirectorAutoExecutionPlan {
@@ -474,9 +486,11 @@ export interface DirectorTaskSeedPayloadSnapshot {
     targetId?: string | null;
     completedAt: string;
   } | null;
+  creativeCarryoverContract?: CreativeCarryoverContract | null;
 }
 
 export interface DirectorLLMOptions {
+  directorVersion?: DirectorVersion;
   provider?: LLMProvider;
   model?: string;
   temperature?: number;
@@ -622,6 +636,7 @@ export interface DirectorProjectContextInput {
   writingMode?: "original" | "continuation";
   projectMode?: ProjectMode;
   readerChannelPreference?: "ai_judge" | "male_oriented" | "female_oriented" | "general";
+  powerSystemPreference?: PowerSystemPreference;
   writingPlatformPreference?: WritingPlatformPreference;
   narrativePov?: NarrativePov;
   pacePreference?: PacePreference;

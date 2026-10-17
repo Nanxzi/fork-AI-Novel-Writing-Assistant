@@ -118,6 +118,13 @@ export interface StyleEngineRuntimeSettingsStatus {
   maxStyleExtractionTimeoutMs: number;
 }
 
+export interface WorldGenerationTimeoutSettings {
+  timeoutMs: number;
+  defaultTimeoutMs: number;
+  minTimeoutMs: number;
+  maxTimeoutMs: number;
+}
+
 export interface LLMSelectionSettings {
   provider: LLMProvider;
   model: string;
@@ -179,6 +186,7 @@ export interface StructuredFallbackSettings {
   model: string;
   temperature: number;
   maxTokens: number | null;
+  retryCount: number;
 }
 
 export interface AutoDirectorChannelConfig {
@@ -318,6 +326,19 @@ export async function saveStyleEngineRuntimeSettings(payload: {
 }) {
   const { data } = await apiClient.put<ApiResponse<StyleEngineRuntimeSettingsStatus>>(
     "/settings/style-engine-runtime",
+    payload,
+  );
+  return data;
+}
+
+export async function getWorldGenerationTimeoutSettings() {
+  const { data } = await apiClient.get<ApiResponse<WorldGenerationTimeoutSettings>>("/settings/world-generation-timeout");
+  return data;
+}
+
+export async function saveWorldGenerationTimeoutSettings(payload: { timeoutMs: number }) {
+  const { data } = await apiClient.put<ApiResponse<WorldGenerationTimeoutSettings>>(
+    "/settings/world-generation-timeout",
     payload,
   );
   return data;

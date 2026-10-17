@@ -27,6 +27,7 @@ import {
   buildVolumeImpactResult,
 } from "./volumePlanUtils";
 import { generateVolumePlanDocument } from "./volumeGenerationOrchestrator";
+import { recoverMissingVolumeStrategy } from "./recovery/missingStrategy";
 import { VolumeChapterSyncService } from "./VolumeChapterSyncService";
 import { getLegacyVolumeSource } from "./legacyVolumeSource";
 import {
@@ -382,7 +383,9 @@ export class NovelVolumeService {
     };
   }
 
-  async getVolumes(novelId: string): Promise<VolumePlanDocument> {
+  async getVolumes(novelId: string, options: {hydrateCanonical?:boolean} = {}): Promise<VolumePlanDocument> {
+    // Planning owns prepared contracts until explicit synchronization to execution.
+    if (options.hydrateCanonical === false) return ensureVolumeWorkspaceDocument({novelId,getLegacySource:()=>getLegacyVolumeSource(novelId)});
     return this.ensureVolumeWorkspace(novelId);
   }
 
@@ -391,6 +394,10 @@ export class NovelVolumeService {
     return this.updateVolumesWithOptions(novelId, workspaceInput, {
       syncToChapterExecution,
     });
+  }
+
+  async recoverVolumeStrategy(novelId: string, options: VolumeGenerateOptions = {}): Promise<VolumePlanDocument | null> {
+    return recoverMissingVolumeStrategy(novelId, this, options);
   }
 
   async updateVolumesWithOptions(
@@ -404,7 +411,8 @@ export class NovelVolumeService {
       memoryTelemetry?: VolumeMemoryTelemetry;
     } = {},
   ): Promise<VolumePlanDocument> {
-    const currentDocument = await this.ensureVolumeWorkspace(novelId);
+    const currentDocument = options.memoryTelemetry?.entrypoint === "director_next"
+      ? await this.getVolumes(novelId,{hydrateCanonical:false}) : await this.ensureVolumeWorkspace(novelId);
     const mergedDocument = mergeVolumeWorkspaceInput(novelId, currentDocument, input);
     const persistedDocument = await this.persistWorkspaceDocument(novelId, mergedDocument, {
       volumeUpdateReason: options.volumeUpdateReason,
@@ -642,10 +650,12 @@ export class NovelVolumeService {
       emitEvent?: boolean;
       syncPayoffLedger?: boolean;
       volumeUpdateReason?: VolumeUpdateReason;
+      hydrateCanonical?: boolean;
     } = {},
   ): Promise<VolumeSyncPreview> {
     return new VolumeChapterSyncService({
-      ensureVolumeWorkspace: (targetNovelId) => this.ensureVolumeWorkspace(targetNovelId),
+      ensureVolumeWorkspace: (targetNovelId) => options.hydrateCanonical === false
+        ? this.getVolumes(targetNovelId,{hydrateCanonical:false}) : this.ensureVolumeWorkspace(targetNovelId),
       ensureActiveVersionRecord: (tx, targetNovelId, document, diffSummary) => (
         this.ensureActiveVersionRecord(tx, targetNovelId, document, diffSummary)
       ),
@@ -687,7 +697,8 @@ export class NovelVolumeService {
 
   async generateVolumes(novelId: string, options: VolumeGenerateOptions = {}): Promise<VolumePlanDocument> {
     return withHighMemoryVolumeGenerationGuard(novelId, options, async () => {
-      const persistedWorkspace = await this.ensureVolumeWorkspace(novelId);
+      const persistedWorkspace = options.entrypoint === "director_next"
+        ? await this.getVolumes(novelId,{hydrateCanonical:false}) : await this.ensureVolumeWorkspace(novelId);
       const workspace = options.draftWorkspace
         ? mergeVolumeWorkspaceInput(novelId, persistedWorkspace, options.draftWorkspace)
         : options.draftVolumes

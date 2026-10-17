@@ -224,6 +224,8 @@ export type ModelRouteTaskType =
   | "chat";
 
 export interface Novel {
+  directorVersion?: "v1" | "v2";
+  directorEpoch?: number;
   id: string;
   title: string;
   description?: string | null;
@@ -259,6 +261,8 @@ export interface Novel {
   continuationBookAnalysisSections?: BookAnalysisSectionKey[] | null;
   referenceBookAnalysisId?: string | null;
   referenceBookAnalysisSections?: BookAnalysisSectionKey[] | null;
+  creativeCarryoverContractJson?: string | null;
+  creativeCarryoverContractSchemaVersion?: number | null;
   outline?: string | null;
   structuredOutline?: string | null;
   volumes?: VolumePlan[];
@@ -308,6 +312,13 @@ export type ChapterEditorOperation =
   | "emotion"
   | "conflict"
   | "custom";
+export type ChapterEditorCursorOperation =
+  | "continue"
+  | "transition"
+  | "dialogue"
+  | "description"
+  | "inner_thought"
+  | "conflict";
 export type ChapterEditorRevisionSource = "preset" | "freeform";
 export type ChapterEditorRevisionScope = "selection" | "chapter";
 
@@ -369,11 +380,18 @@ export interface ChapterEditorMacroContext {
   mustKeepConstraints: string[];
 }
 
-export interface ChapterEditorDiagnosticCard {
-  id: string;
+export interface ChapterEditorRepairBrief {
   title: string;
   problemSummary: string;
   whyItMatters: string;
+  repairGoal?: string;
+  repairApproach?: string;
+  mustPreserve?: string[];
+}
+
+export interface ChapterEditorDiagnosticCard extends ChapterEditorRepairBrief {
+  id: string;
+  sourceIssueId?: string | null;
   recommendedAction: ChapterEditorOperation;
   recommendedScope: ChapterEditorRevisionScope;
   anchorRange?: Pick<ChapterEditorTargetRange, "from" | "to"> | null;
@@ -424,6 +442,7 @@ export interface ChapterEditorAiRevisionRequest {
   scope: ChapterEditorRevisionScope;
   presetOperation?: ChapterEditorOperation;
   instruction?: string;
+  repairBrief?: ChapterEditorRepairBrief;
   contentSnapshot: string;
   selection?: ChapterEditorTargetRange;
   context?: ChapterEditorContextWindow;
@@ -460,6 +479,26 @@ export interface ChapterEditorRewritePreviewResponse {
   sessionId: string;
   operation: ChapterEditorOperation;
   targetRange: ChapterEditorTargetRange;
+  candidates: ChapterEditorCandidate[];
+  activeCandidateId: string | null;
+}
+
+export interface ChapterEditorCursorContinuationRequest {
+  operation: ChapterEditorCursorOperation;
+  contentSnapshot: string;
+  cursorOffset: number;
+  context: ChapterEditorContextWindow;
+  instruction?: string;
+  provider?: import("./llm").LLMProvider;
+  model?: string;
+  temperature?: number;
+}
+
+export interface ChapterEditorCursorContinuationResponse {
+  sessionId: string;
+  operation: ChapterEditorCursorOperation;
+  targetRange: ChapterEditorTargetRange;
+  macroAlignmentNote?: string | null;
   candidates: ChapterEditorCandidate[];
   activeCandidateId: string | null;
 }
@@ -740,6 +779,16 @@ export interface NovelSnapshot {
 
 export type NovelSnapshotListItem = Omit<NovelSnapshot, "snapshotData">;
 
+export interface NovelChapterSnapshotListItem extends NovelSnapshotListItem {
+  chapterId: string;
+  chapterOrder: number;
+  contentLength: number;
+}
+
+export interface NovelChapterSnapshot extends NovelChapterSnapshotListItem {
+  content: string;
+}
+
 export interface ChapterPlanScene {
   id: string;
   planId: string;
@@ -809,6 +858,8 @@ export interface VolumeChapterPlan {
   beatKey?: string | null;
   title: string;
   summary: string;
+  /** V2 split-stage schedule. Missing = unknown; [] = explicitly no on-scene cast. Owned by the version document. */
+  plannedCharacterIds?: string[];
   purpose?: string | null;
   exclusiveEvent?: string | null;
   endingState?: string | null;

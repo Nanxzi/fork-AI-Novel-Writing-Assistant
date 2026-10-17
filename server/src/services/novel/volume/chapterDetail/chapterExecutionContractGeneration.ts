@@ -92,6 +92,7 @@ export async function generateChapterTaskSheetDetail(params: {
 }> {
   const existingChapter = params.promptInput.targetChapter;
   if (
+    !params.options.forceRegenerate &&
     !params.promptInput.guidance?.trim()
     && canReuseChapterExecutionContract({
       novelId: params.promptInput.workspace.novelId,
@@ -100,7 +101,7 @@ export async function generateChapterTaskSheetDetail(params: {
     })
   ) {
     const scenePlan = normalizeChapterScenePlan(
-      existingChapter.sceneCards,
+      JSON.parse(existingChapter.sceneCards ?? "{}"),
       existingChapter.targetWordCount,
     );
     return {
@@ -181,6 +182,11 @@ export async function generateChapterTaskSheetDetail(params: {
         sceneCards: serializeChapterScenePlan(scenePlan),
       }, {
         mode: params.options.chapterTaskSheetQualityMode,
+        onEvaluated: async event => params.options.onChapterTaskSheetQuality?.({
+          chapterId: promptInput.targetChapter.id,
+          chapterOrder: promptInput.targetChapter.chapterOrder,
+          ...event,
+        }),
         provider: params.options.provider,
         model: params.options.model,
         taskId: params.options.taskId,

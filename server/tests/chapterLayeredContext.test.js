@@ -13,6 +13,106 @@ const {
   buildChapterRepairContextBlocks,
 } = require("../dist/prompting/prompts/novel/chapterLayeredContext.js");
 
+test("historical facts cannot grow mandatory context or displace the current task", () => {
+  const { selectContextBlocks } = require("../dist/prompting/core/contextSelection");
+  const pkg = createContextPackage();
+  const write = buildChapterWriteContext({ bookContract: pkg.bookContract, contextPackage: pkg });
+  const recent = Array.from({ length: 20 }, (_, i) => `近期事实${i}：钥匙已成交，不得再当新目标。`);
+  const before = structuredClone(write);
+  const requiredContents = [];
+  for (const oldCount of [0, 2000]) {
+    write.completedMilestones = [
+      ...Array.from({ length: oldCount }, (_, i) => `旧事实${i}：交易已完成，不得重复追求。`), ...recent,
+    ];
+    const originalFacts = [...write.completedMilestones];
+    const review = buildChapterReviewContext(write, pkg);
+    const repair = buildChapterRepairContext({ writeContext: write, contextPackage: pkg, issues: [] });
+    const stages = [buildChapterWriterContextBlocks(write), buildChapterReviewContextBlocks(review), buildChapterRepairContextBlocks(repair)];
+    requiredContents.push(stages.map(blocks => blocks.filter(b => b.required).map(b => b.content)));
+    for (const blocks of stages) {
+      const selected = selectContextBlocks(blocks, { maxTokensBudget: 100 });
+      const mission = selected.selectedBlocks.find(b => b.group === "chapter_mission");
+      assert.ok(mission.content.includes(write.chapterMission.taskSheet), "the complete task sheet survives an exhausted context budget");
+      assert.ok(mission.content.includes(write.chapterMission.hookTarget));
+      assert.ok(!mission.content.includes("旧事实"), "history cannot hide inside mandatory mission input");
+      const history = blocks.find(b => b.group === "completed_milestones");
+      assert.ok(history && !history.required, "historical reference has its own optional budget");
+      assert.ok(history.content.includes("近期事实19"));
+      assert.ok(history.content.length < 2200, "history stays bounded as the book grows");
+      const guards = blocks.filter(b => ["character_hard_facts", "obligation_contract", "reader_experience"].includes(b.group));
+      for (const guard of guards) assert.equal(selected.selectedBlocks.find(b => b.id === guard.id).content, guard.content);
+    }
+    assert.deepEqual(write.completedMilestones, originalFacts, "the saved fact inventory is not truncated");
+  }
+  assert.deepEqual(requiredContents[0], requiredContents[1]);
+  assert.deepEqual(write.chapterMission, before.chapterMission);
+});
+
+test("review budgets background payoff reminders without dropping explicit payoff obligations", () => {
+  const pkg = createContextPackage();
+  const write = buildChapterWriteContext({ bookContract: pkg.bookContract, contextPackage: pkg });
+  const review = buildChapterReviewContext(write, pkg);
+  const { selectContextBlocks } = require("../dist/prompting/core/contextSelection");
+  const blocks = buildChapterReviewContextBlocks(review);
+  const selected = selectContextBlocks(blocks, { maxTokensBudget: 100 });
+  assert.ok(!selected.selectedBlocks.some(b => b.group === "payoff_ledger"));
+  for (const group of ["payoff_directives", "obligation_contract", "chapter_boundary"]) {
+    assert.equal(selected.selectedBlocks.find(b => b.group === group).content, blocks.find(b => b.group === group).content);
+  }
+});
+
+test("identical payoff reminders share one body while distinct versions keep their facts", () => {
+  const pkg = createContextPackage();
+  const write = buildChapterWriteContext({ bookContract: pkg.bookContract, contextPackage: pkg });
+  const item = { ...write.ledgerPendingItems[0], title: "唯一线索", summary: "独有的账本事实" };
+  write.ledgerPendingItems = [item]; write.ledgerUrgentItems = [item]; write.ledgerOverdueItems = [item];
+  const ledger = buildChapterReviewContextBlocks(buildChapterReviewContext(write, pkg)).find(b => b.group === "payoff_ledger");
+  assert.equal(ledger.content.split("独有的账本事实").length - 1, 1);
+  for (const label of ["Urgent payoffs", "Overdue payoffs", "Active pending payoffs"]) assert.ok(ledger.content.includes(label));
+  write.ledgerOverdueItems = [{ ...item, summary: "另一版本的事实" }];
+  const distinct = buildChapterReviewContextBlocks(buildChapterReviewContext(write, pkg)).find(b => b.group === "payoff_ledger");
+  assert.ok(distinct.content.includes("独有的账本事实")); assert.ok(distinct.content.includes("另一版本的事实"));
+});
+
+test("writer, acceptance and repair inherit book perspective without modifying the reference asset", () => {
+  const pkg = createContextPackage();
+  pkg.styleContext = createStyleContext();
+  pkg.bookContract.narrativePov = "third_person";
+  const contract = pkg.styleContext.compiledBlocks.contract;
+  contract.narrative.text = "全程采用第一人称限知视角。";
+  const original = JSON.stringify(contract);
+  const write = buildChapterWriteContext({ bookContract: pkg.bookContract, contextPackage: pkg });
+  const review = buildChapterReviewContext(write, pkg);
+  const repair = buildChapterRepairContext({ writeContext: write, contextPackage: pkg, issues: [] });
+  for (const blocks of [buildChapterWriterContextBlocks(write), buildChapterReviewContextBlocks(review), buildChapterRepairContextBlocks(repair)]) {
+    const style = blocks.find(block => block.group === "style_contract");
+    assert.match(style.content, /叙事视角采用第三人称/);
+    assert.match(style.content, /本书设置.*优先于参考写法/);
+    assert.match(style.content, /第三人称限知不能称为第一人称/);
+  }
+  assert.equal(JSON.stringify(contract), original);
+});
+
+test("acceptance keeps the complete effective style contract when required facts exhaust the budget", () => {
+  const pkg = createContextPackage();
+  pkg.styleContext = createStyleContext();
+  const write = buildChapterWriteContext({ bookContract: pkg.bookContract, contextPackage: pkg });
+  const blocks = buildChapterReviewContextBlocks(buildChapterReviewContext(write, pkg));
+  const { createContextBlock } = require("../dist/prompting/core/contextBudget.js");
+  blocks.unshift(createContextBlock({ id: "oversized_facts", group: "character_hard_facts", priority: 200,
+    required: true, allowSummary: false, content: "必须保留的事实。".repeat(900) }));
+  const { preparePromptExecution } = require("../dist/prompting/core/promptRunner.js");
+  const { chapterAcceptanceAssessmentPrompt } = require("../dist/prompting/prompts/novel/chapterAcceptance.prompts.js");
+  const prepared = preparePromptExecution({ asset: chapterAcceptanceAssessmentPrompt,
+    promptInput: { novelTitle: "测试", chapterOrder: 5, chapterTitle: "测试", content: "正文", styleReviewEnabled: true },
+    contextBlocks: blocks });
+  const original = blocks.find(block => block.group === "style_contract");
+  const selected = prepared.context.blocks.find(block => block.group === "style_contract");
+  assert.ok(selected, "budget cannot discard the selected writing rules");
+  assert.equal(selected.content, original.content, "budget cannot truncate the rule contract");
+  assert.equal(prepared.invocation.summarizedContextBlockIds.includes("style_contract"), false);
+});
+
 test("chapter layered context keeps full book promise and volume reader rewards", () => {
   const book = buildBookContractContext({
     title: "反压测试",
@@ -633,6 +733,85 @@ function createContextPackage() {
   };
 }
 
+test("writer, acceptance and repair retain chapter-sourced positions in live context rather than the cache prefix", () => {
+  const pkg=createContextPackage();
+  pkg.characterHardFacts[0].currentLocation="牢房";
+  pkg.characterHardFacts[0].locationState={currentLocation:"牢房",source:"chapter",sourceChapterId:"c4",sourceChapterOrder:4,
+    contentHash:"hash4",evidence:"甲被押进牢房。",concern:"第4章移动经过有疑点"};
+  const write=buildChapterWriteContext({bookContract:pkg.bookContract,contextPackage:pkg});
+  const {renderCacheContextSections}=require('../dist/prompting/core/cache');
+  const blockSets=[buildChapterWriterContextBlocks(write),buildChapterReviewContextBlocks(buildChapterReviewContext(write,pkg)),
+    buildChapterRepairContextBlocks(buildChapterRepairContext({writeContext:write,contextPackage:pkg,issues:[]}))];
+  for(const blocks of blockSets){
+    const sections=renderCacheContextSections({blocks});
+    assert.ok(sections.dynamic.includes("甲被押进牢房。"));
+    assert.ok(sections.dynamic.includes("第4章移动经过有疑点"));
+    assert.ok(!sections.stable.includes("甲被押进牢房。"));
+    assert.ok(!sections.stable.includes("第4章移动经过有疑点"));
+    const facts=blocks.find(block=>block.group==='character_hard_facts');
+    assert.equal(facts.required,true);
+    assert.equal(facts.allowSummary,false);
+  }
+});
+
+test('canonical scene-card length reaches mission, budget, writing and review when chapter metadata is empty', () => {
+  const contextPackage = createContextPackage();
+  const plan = JSON.parse(contextPackage.chapter.sceneCards);
+  contextPackage.chapter.targetWordCount = null;
+  plan.targetWordCount = 1800;
+  plan.lengthBudget = { targetWordCount: 1800, softMinWordCount: 1530, softMaxWordCount: 2070, hardMaxWordCount: 2250 };
+  plan.scenes.forEach(scene => { scene.targetWordCount = 600; });
+  contextPackage.chapter.sceneCards = JSON.stringify(plan);
+  const write = buildChapterWriteContext({ bookContract: buildBookContractContext({ title: '本书' }), macroConstraints: null, volumeWindow: null, contextPackage });
+  assert.equal(write.chapterMission.targetWordCount, 1800);
+  assert.equal(write.lengthBudget.targetWordCount, 1800);
+  assert.equal(write.scenePlan.targetWordCount, 1800);
+  assert.equal(buildChapterReviewContext(write, contextPackage).chapterMission.targetWordCount, 1800);
+});
+
+test('explicit chapter length takes precedence over scene-card length', () => {
+  const contextPackage = createContextPackage(); contextPackage.chapter.targetWordCount = 2400;
+  const write = buildChapterWriteContext({ bookContract: buildBookContractContext({ title: '本书' }), macroConstraints: null, volumeWindow: null, contextPackage });
+  assert.equal(write.chapterMission.targetWordCount, 2400);
+  assert.equal(write.lengthBudget.targetWordCount, 2400);
+  assert.equal(write.scenePlan.targetWordCount, 2400);
+});
+
+test('malformed scene cards cannot invent a chapter target', () => {
+  const contextPackage = createContextPackage(); contextPackage.chapter.targetWordCount = null;
+  contextPackage.chapter.sceneCards = JSON.stringify({ targetWordCount: 1800, scenes: [] });
+  const write = buildChapterWriteContext({ bookContract: buildBookContractContext({ title: '本书' }), macroConstraints: null, volumeWindow: null, contextPackage });
+  assert.equal(write.chapterMission.targetWordCount, null);
+  assert.equal(write.lengthBudget, null);
+});
+
+test('genre and story-mode foundation precedes changing chapter state in writing, review and repair without freezing edits', () => {
+  const { renderCacheContextSections } = require('../dist/prompting/core/cache');
+  const contextPackage = createContextPackage();
+  const build = (foundation, nextAction) => buildChapterWriteContext({
+    bookContract: buildBookContractContext({ title: '本书' }),
+    productionFoundationPrompt: foundation,
+    macroConstraints: null, volumeWindow: null,
+    contextPackage: { ...contextPackage, nextAction },
+  });
+  for (const mode of ['full', 'review', 'repair']) {
+    const blocks = buildChapterWriterContextBlocks(build('题材：悬疑，线索须有来源', '确认钥匙来源'), { mode });
+    const foundation = blocks.find(block => block.group === 'production_foundation');
+    assert.equal(foundation.reuseScope, 'book');
+    assert.equal(foundation.required, true);
+    assert.equal(foundation.allowSummary, false);
+    const a = renderCacheContextSections({ blocks });
+    const b = renderCacheContextSections({ blocks: buildChapterWriterContextBlocks(build('题材：悬疑，线索须有来源', '进入维修通道'), { mode }) });
+    assert.equal(a.stable, b.stable);
+    assert.ok(b.dynamic.includes('进入维修通道'));
+    assert.ok(!b.dynamic.includes('确认钥匙来源'));
+    assert.ok(a.stable.includes('线索须有来源'));
+    const edited = renderCacheContextSections({ blocks: buildChapterWriterContextBlocks(build('题材：悬疑，叙事保持克制', '进入维修通道'), { mode }) });
+    assert.ok(edited.stable.includes('叙事保持克制'));
+    assert.ok(!edited.stable.includes('线索须有来源'));
+  }
+});
+
 function createStyleContext() {
   const makeSection = (key, title, text) => ({
     key,
@@ -745,17 +924,18 @@ test("chapter layered contexts carry volume mission, character duties and repair
   assert.ok(writeContext.chapterBoundary.doNotCross.some((item) => item.includes("不要提前揭露幕后黑手")));
   assert.ok(reviewContext.structureObligations.includes("volume mission: 建立压迫源并完成第一次反压"));
   assert.ok(reviewContext.structureObligations.some((item) => item.includes("payoff directive: pressure First payoff")));
-  assert.ok(reviewContext.structureObligations.some((item) => item.includes("pending payoff: 女二情报钥匙")));
-  assert.ok(reviewContext.structureObligations.some((item) => item.includes("urgent payoff: 黑市账户异常")));
-  assert.ok(reviewContext.structureObligations.some((item) => item.includes("overdue payoff: 第一次反压收益")));
+  assert.ok(!reviewContext.structureObligations.some((item) => item.includes("pending payoff: 女二情报钥匙")));
+  assert.ok(!reviewContext.structureObligations.some((item) => item.includes("urgent payoff: 黑市账户异常")));
+  assert.ok(!reviewContext.structureObligations.some((item) => item.includes("overdue payoff: 第一次反压收益")));
   assert.ok(reviewContext.structureObligations.some((item) => item.includes("resource setup needed: 女二暗账副本")));
   assert.ok(reviewContext.structureObligations.some((item) => item.includes("resource unavailable: 旧通行证")));
   assert.ok(reviewContext.structureObligations.some((item) => item.includes("unconfirmed resource proposal: 女二暗账副本可能已经交给主角")));
   assert.ok(!reviewContext.structureObligations.some((item) => item.includes("resource needs confirmation")));
   assert.ok(repairContext.allowedEditBoundaries.some((item) => item.includes("Pending character candidates remain read-only")));
   assert.ok(repairContext.allowedEditBoundaries.some((item) => item.includes("女二")));
-  assert.ok(repairContext.allowedEditBoundaries.some((item) => item.includes("urgent payoff thread: 黑市账户异常")));
-  assert.ok(repairContext.allowedEditBoundaries.some((item) => item.includes("overdue payoff pressure: 第一次反压收益")));
+  assert.ok(repairContext.allowedEditBoundaries.some((item) => item.includes("Preserve established payoff setups")));
+  assert.ok(!repairContext.allowedEditBoundaries.some((item) => item.includes("urgent payoff thread:")));
+  assert.ok(!repairContext.allowedEditBoundaries.some((item) => item.includes("overdue payoff pressure:")));
   assert.ok(repairContext.allowedEditBoundaries.some((item) => item.includes("Patch resource continuity before using 旧通行证")));
 
   const writerBlocks = buildChapterWriterContextBlocks(writeContext);
@@ -832,9 +1012,10 @@ test("chapter layered contexts carry volume mission, character duties and repair
     && /Do not cross/.test(block.content)
   )));
   assert.ok(reviewBlocks.some((block) => (
-    block.id === "structure_obligations"
-    && /urgent payoff: 黑市账户异常/.test(block.content)
-    && /overdue payoff: 第一次反压收益/.test(block.content)
+    block.id === "payoff_ledger"
+    && !block.required && block.allowSummary === false
+    && /urgent: 黑市账户异常/.test(block.content)
+    && /overdue: 第一次反压收益/.test(block.content)
   )));
   assert.ok(reviewBlocks.some((block) => (
     block.id === "chapter_mission"

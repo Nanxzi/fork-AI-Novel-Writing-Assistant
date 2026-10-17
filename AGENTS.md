@@ -181,8 +181,10 @@ These areas have the highest priority for wiki accumulation:
 
 ## Agent Collaboration Rules
 
+- Before creating, resuming, or assigning work to a subagent, ask the user and obtain explicit approval for that specific delegation. General authorization to continue development and earlier subagent approval do not carry over to another delegation.
+- An approved subagent must use an explicitly selected Luna-series model. Never inherit the current model, and never invoke Astra, Sol, Terra, or another higher-tier or non-Luna model as a subagent. If Luna is unavailable, continue without subagents and report the limitation.
 - The project allows subagents to assist with development, investigation, verification, and documentation work when the active tool environment and higher-priority instructions permit it.
-- Use subagents for well-scoped parallel work such as independent codebase exploration, focused implementation slices, documentation audits, or non-blocking verification.
+- After that specific approval, use Luna subagents only for well-scoped work such as independent codebase exploration, focused implementation slices, documentation audits, or non-blocking verification.
 - When delegating implementation, assign clear ownership of files or modules. Subagents must not revert or overwrite changes made by others.
 - Do not use subagents to bypass project safety rules, data protection rules, branch workflow, prompt governance, or release-note / wiki requirements.
 - Do not delegate destructive operations, database resets, migrations with data-loss risk, public release uploads, or branch promotion decisions.
@@ -245,6 +247,8 @@ These areas have the highest priority for wiki accumulation:
 - When packaging is requested and there is no explicit, current, repo-specific knowledge that local packaging is required, prefer triggering the GitHub-side packaging workflow rather than inventing local packaging steps.
 - Do not run local desktop packaging just to guess the release process. Local packaging is appropriate only when the user explicitly asks for local artifacts, the task is packaging verification, or the relevant docs/scripts clearly require local staging.
 - GitHub-side packaging still must obey the version/tag rules above. If the correct workflow, tag, branch, or version is unclear, stop and verify the release identifier before triggering packaging.
+- After pushing and triggering GitHub packaging, hand off with the pushed ref and workflow link. Do not keep waiting, repeatedly fetch packaging status or logs, or create a packaging monitor by default.
+- Wait for packaging or check its result only when the user explicitly asks to wait, monitor, or inspect the result. A successful push or trigger is evidence that packaging was triggered; claim successful publication only when completed-release evidence is already available.
 
 ## Prompt Governance
 
@@ -261,6 +265,13 @@ These areas have the highest priority for wiki accumulation:
 - For naming and registration workflow, follow `server/src/prompting/README.md`.
 
 ## README Release Notes Workflow
+
+### Commit And Iteration Summary Format
+
+- Commit, push, PR, and release iteration summaries must be organized by user-visible outcome under `新增`、`优化`、`修复`; omit categories with no applicable content.
+- New commit subjects must start with the dominant category as `新增：`、`优化：` or `修复：`, followed by a concise description of the user outcome.
+- Before publishing a batch of unpushed commits, inspect the complete unpublished range rather than only the working tree or latest commit, then merge duplicate items into one iteration summary.
+- Keep implementation details, file lists, test names, and internal schema identifiers out of user-facing summaries unless users need the exact term to operate the product.
 
 - Before any commit, push, or PR step in this repository, use the `readme-release-updater` skill from `${CODEX_HOME:-~/.codex}/skills/readme-release-updater` to inspect the Git scope, summarize the user-visible changes, update `docs/releases/release-notes.md`, and refresh `README.md` `## 最新更新` when applicable.
 - If the `readme-release-updater` skill does not exist in the expected Codex skills directory, create it first before any commit, push, or PR step instead of skipping the workflow.

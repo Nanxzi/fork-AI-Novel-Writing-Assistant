@@ -192,6 +192,14 @@ export class DefaultNovelApplicationServices {
     return this.core.listNovelSnapshots(...args);
   }
 
+  listChapterSnapshots(...args: Parameters<NovelCoreService["listChapterSnapshots"]>) {
+    return this.core.listChapterSnapshots(...args);
+  }
+
+  getChapterSnapshot(...args: Parameters<NovelCoreService["getChapterSnapshot"]>) {
+    return this.core.getChapterSnapshot(...args);
+  }
+
   async restoreFromSnapshot(novelId: string, snapshotId: string) {
     const snapshot = await prisma.novelSnapshot.findFirst({
       where: { id: snapshotId, novelId },
@@ -453,6 +461,10 @@ export class DefaultNovelApplicationServices {
 
   previewChapterAiRevision(...args: Parameters<NovelChapterEditorService["previewAiRevision"]>) {
     return this.chapterEditorService.previewAiRevision(...args);
+  }
+
+  previewChapterCursorContinuation(...args: Parameters<NovelChapterEditorService["previewCursorContinuation"]>) {
+    return this.chapterEditorService.previewCursorContinuation(...args);
   }
 
   getChapterEditorWorkspace(...args: Parameters<ChapterEditorWorkspaceService["getWorkspace"]>) {

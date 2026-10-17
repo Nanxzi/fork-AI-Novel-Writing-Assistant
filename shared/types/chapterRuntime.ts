@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { styleSignalPolicySchema } from "./styleEngine.js";
+import { characterLocationStateSchema } from "./characterLocation";
 import {
   chapterScenePlanSchema,
   lengthBudgetContractSchema,
@@ -118,6 +120,7 @@ export const runtimeCharacterSchema = z.object({
   powerLevel: z.string().nullable().optional(),
   realm: z.string().nullable().optional(),
   currentLocation: z.string().nullable().optional(),
+  locationState: characterLocationStateSchema.optional(),
   availability: z.string().nullable().optional(),
   prohibitions: z.array(z.string()).default([]),
   currentState: z.string().nullable().optional(),
@@ -460,6 +463,7 @@ export const chapterCharacterHardFactSchema = z.object({
   powerLevel: z.string().nullable().optional(),
   realm: z.string().nullable().optional(),
   currentLocation: z.string().nullable().optional(),
+  locationState: characterLocationStateSchema.optional(),
   availability: z.string().nullable().optional(),
   currentState: z.string().nullable().optional(),
   currentGoal: z.string().nullable().optional(),
@@ -557,6 +561,9 @@ export const generationContextPackageSchema = z.object({
   openingHint: z.string(),
   continuation: runtimeContinuationSchema,
   styleContext: runtimeStyleContextSchema.nullable().optional(),
+  // Snapshot the book's review choice; older context producers retain the enabled default.
+  postGenerationStyleReviewEnabled: z.boolean().optional(),
+  styleSignalPolicy: styleSignalPolicySchema.optional(),
   characterDynamics: runtimeDynamicCharacterOverviewSchema.nullable().optional(),
   characterMindStates: z.array(runtimeCharacterMindStateSchema).default([]),
   // Optional for older preview / recovery context producers; runtime consumers default to no guidance.

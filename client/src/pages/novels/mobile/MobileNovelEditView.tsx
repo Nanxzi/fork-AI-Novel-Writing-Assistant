@@ -1,4 +1,6 @@
 import { useState } from "react";
+import DirectorVersionControl from "@/components/directorVersion/DirectorVersionControl";
+import DirectorStepCalibrationDialog from "../components/DirectorStepCalibrationDialog";
 import { Loader2, MoreHorizontal } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -50,6 +52,7 @@ export default function MobileNovelEditView(props: NovelEditViewProps) {
     characterTab,
     takeover,
     taskDrawer,
+    directorStepCalibration,
     activeStepTakeoverEntry,
   } = props;
   const [isToolsOpen, setIsToolsOpen] = useState(false);
@@ -123,6 +126,7 @@ export default function MobileNovelEditView(props: NovelEditViewProps) {
         <div className="flex min-w-0 items-start justify-between gap-3">
           <div className="min-w-0">
             <h1 className="truncate text-lg font-semibold text-foreground">{novelTitle}</h1>
+            <DirectorVersionControl novelId={id} version="v1" />
             <p className="mt-0.5 text-xs text-muted-foreground">{statusText}</p>
           </div>
           <Dialog open={isToolsOpen} onOpenChange={setIsToolsOpen}>
@@ -165,6 +169,10 @@ export default function MobileNovelEditView(props: NovelEditViewProps) {
                     <span>查看任务进度</span>
                     {taskAttentionLabel ? <Badge variant="secondary">{taskAttentionLabel}</Badge> : null}
                   </Button>
+                ) : null}
+
+                {directorStepCalibration ? (
+                  <DirectorStepCalibrationDialog {...directorStepCalibration} />
                 ) : null}
 
                 <div className="rounded-xl border border-border/70 p-3">

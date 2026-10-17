@@ -2,17 +2,19 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { Value } from "platejs";
 import { ParagraphPlugin, Plate, PlateContent, usePlateEditor } from "platejs/react";
 import type { ChapterEditorDiffChunk } from "@ai-novel/shared/types/novel";
-import type { ChapterEditorSelectionRange, SelectionToolbarPosition } from "./chapterEditorTypes";
+import { applySelectedChapterEditorDiff, groupChapterEditorDiffChanges } from "@ai-novel/shared/types/chapterEditor/document";
+import type { ChapterEditorDiffChange } from "@ai-novel/shared/types/chapterEditor/document";
+import type { ChapterEditorSelectionRange } from "./chapterEditorTypes";
 import {
   buildSelectionRangeFromValue,
-  buildToolbarPosition,
+  getCursorOffsetFromValue,
   getParagraphIndicesForRange,
   normalizeChapterContent,
   normalizeEditorText,
   normalizeValuePayload,
   toPlainText,
   toPlateValue,
-} from "./chapterEditorUtils";
+} from "./document";
 
 type ChapterEditorPreview =
   | {
@@ -26,6 +28,7 @@ type ChapterEditorPreview =
     from: number;
     to: number;
     diffChunks: ChapterEditorDiffChunk[];
+    selectedChangeIds: ReadonlySet<string>;
     originalText: string;
     candidateText: string;
   }
@@ -34,6 +37,7 @@ type ChapterEditorPreview =
     from: number;
     to: number;
     diffChunks: ChapterEditorDiffChunk[];
+    selectedChangeIds: ReadonlySet<string>;
     originalText: string;
     candidateText: string;
   };
@@ -42,9 +46,11 @@ interface ChapterTextEditorProps {
   value: string;
   readOnly?: boolean;
   onChange: (next: string) => void;
-  onSelectionChange: (selection: ChapterEditorSelectionRange | null, position: SelectionToolbarPosition | null) => void;
+  onSelectionChange: (selection: ChapterEditorSelectionRange | null) => void;
+  onCursorChange: (offset: number | null) => void;
   preview?: ChapterEditorPreview | null;
   focusRange?: Pick<ChapterEditorSelectionRange, "from" | "to"> | null;
+  focusRequestKey?: number;
 }
 
 const EDITOR_BODY_CLASS_NAME = "prose prose-sm max-w-none min-w-0 overflow-hidden break-words text-[15px] leading-8 dark:prose-invert [&_code]:break-all [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_pre]:whitespace-pre-wrap [&_pre]:break-words";
@@ -88,19 +94,19 @@ function getParagraphElements(surface: HTMLDivElement): HTMLElement[] {
   return candidates.filter((node) => node.textContent?.trim());
 }
 
-function renderDiffChunk(chunk: ChapterEditorDiffChunk) {
+function renderDiffChunk(chunk: ChapterEditorDiffChunk, change: ChapterEditorDiffChange | undefined, selected: boolean) {
   if (chunk.type === "equal") {
     return <span key={chunk.id}>{chunk.text}</span>;
   }
   if (chunk.type === "insert") {
     return (
-      <span key={chunk.id} className="rounded bg-emerald-100/90 px-0.5 text-emerald-950">
+      <span key={chunk.id} className={`rounded px-0.5 ${selected ? "bg-emerald-100/90 text-emerald-950" : "bg-muted/40 text-muted-foreground"}`} data-diff-change-id={change?.id}>
         {chunk.text}
       </span>
     );
   }
   return (
-    <span key={chunk.id} className="rounded bg-rose-100/80 px-0.5 text-rose-900 line-through">
+    <span key={chunk.id} className={`rounded px-0.5 line-through ${selected ? "bg-rose-100/80 text-rose-900" : "bg-muted/40 text-muted-foreground"}`} data-diff-change-id={change?.id}>
       {chunk.text}
     </span>
   );
@@ -111,14 +117,15 @@ function renderLoadingPreview(
   previewContent: { before: string; after: string },
   surfaceRef: React.RefObject<HTMLDivElement | null>,
 ) {
+  const isInsertion = preview.from === preview.to && preview.originalText.length === 0;
   return (
     <div ref={surfaceRef} className={`space-y-4 rounded-2xl bg-muted/10 p-4 ${SURFACE_INNER_PADDING_CLASS_NAME}`}>
       <TextBlock text={previewContent.before} className="text-foreground" />
 
       <div className="space-y-3">
         <div className="rounded-2xl border border-amber-200/80 bg-amber-50/80 p-4">
-          <div className="mb-2 text-xs font-medium text-amber-700">待改写原文</div>
-          <TextBlock text={preview.originalText} className="text-amber-950" />
+          <div className="mb-2 text-xs font-medium text-amber-700">{isInsertion ? "待插入位置" : "待改写原文"}</div>
+          {isInsertion ? <div className="text-sm text-amber-950">光标所在位置将插入 AI 候选正文。</div> : <TextBlock text={preview.originalText} className="text-amber-950" />}
         </div>
         <div className="rounded-2xl border border-dashed border-border/70 bg-background/80 p-4">
           <div className="mb-2 text-xs font-medium text-muted-foreground">AI 正在生成候选版本</div>
@@ -140,18 +147,29 @@ function renderBlockPreview(
   previewContent: { before: string; after: string },
   surfaceRef: React.RefObject<HTMLDivElement | null>,
 ) {
+  const isInsertion = preview.from === preview.to && preview.originalText.length === 0;
+  let selectedText = preview.candidateText;
+  try {
+    selectedText = applySelectedChapterEditorDiff(preview.originalText, preview.candidateText, preview.diffChunks, preview.selectedChangeIds);
+  } catch {
+    // The review panel surfaces the validation error; keep the full candidate visible as context.
+  }
   return (
     <div ref={surfaceRef} className={`space-y-4 rounded-2xl bg-muted/10 p-4 ${SURFACE_INNER_PADDING_CLASS_NAME}`}>
       <TextBlock text={previewContent.before} className="text-foreground" />
 
       <div className="space-y-3">
         <div className="rounded-2xl border border-rose-200/80 bg-rose-50/80 p-4">
-          <div className="mb-2 text-xs font-medium text-rose-700">原文</div>
-          <TextBlock text={preview.originalText} className="text-rose-950" />
+          <div className="mb-2 text-xs font-medium text-rose-700">{isInsertion ? "插入位置" : "原文"}</div>
+          {isInsertion ? <div className="text-sm text-rose-950">这里没有需要删除的原文，候选会作为新内容插入。</div> : <TextBlock text={preview.originalText} className="text-rose-950" />}
         </div>
         <div className="rounded-2xl border border-emerald-200/80 bg-emerald-50/90 p-4">
-          <div className="mb-2 text-xs font-medium text-emerald-700">改写</div>
-          <TextBlock text={preview.candidateText} className="text-emerald-950" />
+          <div className="mb-2 text-xs font-medium text-emerald-700">本次将写回</div>
+          {selectedText === preview.originalText || !selectedText.trim() ? (
+            <div className="text-sm text-emerald-950/70">当前没有选择要写回的改动。</div>
+          ) : (
+            <TextBlock text={selectedText} className="text-emerald-950" />
+          )}
         </div>
       </div>
 
@@ -161,11 +179,10 @@ function renderBlockPreview(
 }
 
 export default function ChapterTextEditor(props: ChapterTextEditorProps) {
-  const { value, readOnly = false, onChange, onSelectionChange, preview, focusRange = null } = props;
+  const { value, readOnly = false, onChange, onSelectionChange, onCursorChange, preview, focusRange = null, focusRequestKey = 0 } = props;
   const [editorSeed, setEditorSeed] = useState(0);
   const [internalText, setInternalText] = useState(() => normalizeChapterContent(value));
   const [paragraphMarkerOffsets, setParagraphMarkerOffsets] = useState<Array<{ index: number; top: number }>>([]);
-  const containerRef = useRef<HTMLDivElement | null>(null);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const isUserEditingRef = useRef(false);
 
@@ -184,30 +201,39 @@ export default function ChapterTextEditor(props: ChapterTextEditorProps) {
     }
     setInternalText(nextValue);
     setEditorSeed((current) => current + 1);
-  }, [internalText, value]);
+    onSelectionChange(null);
+    onCursorChange(null);
+  }, [internalText, onCursorChange, onSelectionChange, value]);
 
   useEffect(() => {
     if (preview || readOnly) {
-      onSelectionChange(null, null);
+      onSelectionChange(null);
+      onCursorChange(null);
     }
-  }, [onSelectionChange, preview, readOnly]);
+  }, [onCursorChange, onSelectionChange, preview, readOnly]);
 
   const updateSelection = useCallback(() => {
     if (!editor || preview || readOnly) {
-      onSelectionChange(null, null);
+      onSelectionChange(null);
+      onCursorChange(null);
       return;
     }
 
-    const selectionObject = globalThis.window?.getSelection?.();
     const surface = surfaceRef.current;
-    if (!selectionObject || !surface || selectionObject.rangeCount === 0 || selectionObject.isCollapsed) {
-      onSelectionChange(null, null);
+    // Keep the last prose target while the author uses the AI controls.
+    if (!surface || !surface.contains(surface.ownerDocument.activeElement)) {
       return;
     }
-
-    const range = selectionObject.getRangeAt(0);
-    if (!surface.contains(range.commonAncestorContainer)) {
-      onSelectionChange(null, null);
+    const selectionObject = globalThis.window?.getSelection?.();
+    if (!selectionObject || selectionObject.rangeCount === 0
+      || !surface.contains(selectionObject.anchorNode) || !surface.contains(selectionObject.focusNode)) {
+      return;
+    }
+    if (selectionObject.isCollapsed) {
+      const point = editor.selection?.anchor as { path: number[]; offset: number } | undefined;
+      const offset = getCursorOffsetFromValue(editor.children as Value, point);
+      onSelectionChange(null);
+      onCursorChange(offset);
       return;
     }
 
@@ -216,15 +242,14 @@ export default function ChapterTextEditor(props: ChapterTextEditorProps) {
       focus: { path: number[]; offset: number };
     } | null);
     if (!selectionRange) {
-      onSelectionChange(null, null);
+      onSelectionChange(null);
+      onCursorChange(null);
       return;
     }
 
-    const container = containerRef.current;
-    const position = container ? buildToolbarPosition(container, range) : null;
-
-    onSelectionChange(selectionRange, position);
-  }, [editor, onSelectionChange, preview, readOnly]);
+    onSelectionChange(selectionRange);
+    onCursorChange(null);
+  }, [editor, onCursorChange, onSelectionChange, preview, readOnly]);
 
   const handleValueChange = useCallback((payload: unknown) => {
     const nextText = normalizeEditorText(toPlainText(normalizeValuePayload(payload)));
@@ -236,6 +261,16 @@ export default function ChapterTextEditor(props: ChapterTextEditorProps) {
   }, [internalText, onChange]);
 
   const normalizedContent = useMemo(() => normalizeChapterContent(value), [value]);
+
+  const previewChangeByChunkId = useMemo(() => {
+    if (!preview || preview.mode === "loading") {
+      return new Map<string, ChapterEditorDiffChange>();
+    }
+    return new Map(
+      groupChapterEditorDiffChanges(preview.diffChunks)
+        .flatMap((change) => change.chunkIds.map((chunkId) => [chunkId, change] as const)),
+    );
+  }, [preview]);
 
   const previewContent = useMemo(() => {
     if (!preview) {
@@ -260,9 +295,9 @@ export default function ChapterTextEditor(props: ChapterTextEditorProps) {
         ? "当前正在显示段落 patch 对比，原文和改写会在正文原位置并排落成红绿块。"
         : readOnly
           ? "当前有待确认候选，正文暂时锁定，可在右侧切换候选或接受、拒绝。"
-      : "可直接编辑正文，选中内容后可发起 AI 改写。";
+      : "点击定位光标或选中片段，在 AI 操作区选择续写或改写。";
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const surface = surfaceRef.current;
     if (!surface || preview) {
       return;
@@ -284,9 +319,9 @@ export default function ChapterTextEditor(props: ChapterTextEditorProps) {
     }
     paragraphNodes[paragraphIndices.startIndex]?.scrollIntoView({
       block: "center",
-      behavior: "smooth",
+      behavior: focusRequestKey ? "instant" : "smooth",
     });
-  }, [highlightedParagraphRange, preview]);
+  }, [focusRequestKey, highlightedParagraphRange, preview]);
 
   const updateParagraphMarkers = useCallback(() => {
     const surface = surfaceRef.current;
@@ -358,7 +393,7 @@ export default function ChapterTextEditor(props: ChapterTextEditorProps) {
   ) : null;
 
   return (
-    <div ref={containerRef} className="relative flex h-full min-h-[540px] flex-col overflow-hidden rounded-3xl border border-border/70 bg-background shadow-sm xl:min-h-0">
+    <div className="relative flex h-full min-h-[540px] flex-col overflow-hidden bg-background xl:min-h-0">
       <div className="shrink-0 flex items-center justify-between border-b border-border/70 px-4 py-3">
         <div className="text-sm font-medium text-foreground">正文</div>
         <div className="text-xs text-muted-foreground">{helperText}</div>
@@ -372,7 +407,7 @@ export default function ChapterTextEditor(props: ChapterTextEditorProps) {
               className={`${INLINE_PREVIEW_BODY_CLASS_NAME} ${SURFACE_INNER_PADDING_CLASS_NAME} min-h-full rounded-2xl bg-muted/15 p-4 text-foreground`}
             >
               {previewContent.before}
-              {preview.diffChunks.map((chunk) => renderDiffChunk(chunk))}
+              {preview.diffChunks.map((chunk) => renderDiffChunk(chunk, previewChangeByChunkId.get(chunk.id), preview.selectedChangeIds.has(previewChangeByChunkId.get(chunk.id)?.id ?? "")))}
               {previewContent.after}
             </div>
           ) : preview?.mode === "loading" && previewContent ? (

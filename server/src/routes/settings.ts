@@ -12,7 +12,14 @@ import { z } from "zod";
 import { prisma } from "../db/prisma";
 import { setProviderSecretCache } from "../llm/factory";
 import { evictSharedLimiters } from "../llm/requestLimiter";
-import { filterHiddenModels, parseHiddenModels, refreshProviderModels, serializeHiddenModels } from "../llm/modelCatalog";
+import {
+  filterHiddenModels,
+  parseHiddenModels,
+  parseModelList,
+  refreshProviderModels,
+  serializeHiddenModels,
+  serializeModelList,
+} from "../llm/modelCatalog";
 import { llmProviderSchema } from "../llm/providerSchema";
 import { isDeepSeekThinkingModeProvider, normalizeReasoningEffort } from "../llm/reasoning";
 import {
@@ -53,6 +60,12 @@ import {
   MIN_STYLE_EXTRACTION_TIMEOUT_MS,
   saveStyleEngineRuntimeSettings,
 } from "../services/settings/StyleEngineRuntimeSettingsService";
+import {
+  getWorldGenerationTimeoutSettings,
+  MAX_WORLD_GENERATION_TIMEOUT_MS,
+  MIN_WORLD_GENERATION_TIMEOUT_MS,
+  saveWorldGenerationTimeoutSettings,
+} from "../services/settings/worldGeneration/timeoutSettings";
 import { registerCustomProviderRoutes } from "./settings/customProviderRoutes";
 import { registerLLMSelectionRoutes } from "./settings/llmSelectionRoutes";
 
@@ -123,6 +136,14 @@ const styleEngineRuntimeSettingsSchema = z.object({
     .max(MAX_STYLE_EXTRACTION_TIMEOUT_MS),
 });
 
+const worldGenerationTimeoutSchema = z.object({
+  timeoutMs: z.coerce
+    .number()
+    .int()
+    .min(MIN_WORLD_GENERATION_TIMEOUT_MS)
+    .max(MAX_WORLD_GENERATION_TIMEOUT_MS),
+});
+
 type APIKeyRecordLike = {
   provider: string;
   displayName: string | null;
@@ -134,6 +155,7 @@ type APIKeyRecordLike = {
   reasoningEnabled?: boolean | null;
   reasoningEffort?: string | null;
   hiddenModels?: string | null;
+  availableModels?: string | null;
   concurrencyLimit?: number | null;
   requestIntervalMs?: number | null;
 };
@@ -285,6 +307,7 @@ function buildCustomProviderStatus(item: {
   reasoningEnabled?: boolean | null;
   reasoningEffort?: string | null;
   hiddenModels?: string | null;
+  availableModels?: string | null;
   concurrencyLimit?: number | null;
   requestIntervalMs?: number | null;
 }, imageModel: string | undefined): CustomProviderStatus {
@@ -292,7 +315,11 @@ function buildCustomProviderStatus(item: {
   const currentBaseURL = normalizeOptionalText(item.baseURL) ?? "";
   const currentAuthMode = normalizeProviderAuthMode(item.authMode);
   const hiddenModels = parseHiddenModels(item.hiddenModels);
-  const models = filterHiddenModels(currentModel ? [currentModel] : [], hiddenModels, currentModel);
+  const models = filterHiddenModels(
+    [...parseModelList(item.availableModels), currentModel],
+    hiddenModels,
+    currentModel,
+  );
   const supportsReasoningEffort = isDeepSeekThinkingModeProvider(item.provider, currentBaseURL, currentModel);
   return {
     provider: item.provider,
@@ -348,6 +375,36 @@ router.put(
         success: true,
         data,
         message: "写法引擎运行设置保存成功。",
+      } satisfies ApiResponse<typeof data>);
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+router.get("/world-generation-timeout", async (_req, res, next) => {
+  try {
+    const data = await getWorldGenerationTimeoutSettings();
+    res.status(200).json({
+      success: true,
+      data,
+      message: "世界观生成等待时间读取成功。",
+    } satisfies ApiResponse<typeof data>);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.put(
+  "/world-generation-timeout",
+  validate({ body: worldGenerationTimeoutSchema }),
+  async (req, res, next) => {
+    try {
+      const data = await saveWorldGenerationTimeoutSettings(req.body as z.infer<typeof worldGenerationTimeoutSchema>);
+      res.status(200).json({
+        success: true,
+        data,
+        message: "世界观生成等待时间保存成功。",
       } satisfies ApiResponse<typeof data>);
     } catch (error) {
       next(error);
@@ -659,21 +716,28 @@ router.put(
       evictSharedLimiters(provider);
 
       const hiddenModels = parseHiddenModels(data.hiddenModels);
-      let models = filterHiddenModels(getFallbackModels(provider, data.model ?? undefined), hiddenModels, data.model ?? undefined);
+      let availableModels = Array.from(new Set([
+        ...parseModelList(data.availableModels),
+        data.model ?? "",
+      ].filter(Boolean)));
+      let models = filterHiddenModels(availableModels, hiddenModels, data.model ?? undefined);
       let message = "厂商配置已保存。";
       try {
-        models = filterHiddenModels(
-          await refreshProviderModels(
-            provider,
-            effectiveKey,
-            nextBaseURL ?? getProviderEnvBaseUrl(provider),
-            nextAuthMode,
-          ),
-          hiddenModels,
-          data.model ?? undefined,
+        availableModels = await refreshProviderModels(
+          provider,
+          effectiveKey,
+          nextBaseURL ?? getProviderEnvBaseUrl(provider),
+          nextAuthMode,
         );
+        models = filterHiddenModels(availableModels, hiddenModels, data.model ?? undefined);
       } catch {
         message = "厂商配置已保存，但模型列表刷新失败。可以稍后在厂商卡片中刷新。";
+      }
+
+      if (!isBuiltInProvider(provider)) {
+        await secretStore.updateProvider(provider, {
+          availableModels: serializeModelList(availableModels),
+        });
       }
 
       res.status(200).json({
@@ -763,12 +827,18 @@ router.post(
       const currentModel = normalizeOptionalText(keyConfig?.model)
         ?? getProviderEnvModel(provider)
         ?? (isBuiltInProvider(provider) ? PROVIDERS[provider].defaultModel : "");
-      const models = filterHiddenModels(await refreshProviderModels(
+      const availableModels = await refreshProviderModels(
         provider,
         effectiveKey,
         normalizeOptionalText(keyConfig?.baseURL) ?? getProviderEnvBaseUrl(provider),
         normalizeProviderAuthMode(keyConfig?.authMode),
-      ), hiddenModels, currentModel);
+      );
+      const models = filterHiddenModels(availableModels, hiddenModels, currentModel);
+      if (!isBuiltInProvider(provider) && keyConfig) {
+        await secretStore.updateProvider(provider, {
+          availableModels: serializeModelList(availableModels),
+        });
+      }
       res.status(200).json({
         success: true,
         data: {

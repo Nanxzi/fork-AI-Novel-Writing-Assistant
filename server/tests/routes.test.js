@@ -397,6 +397,7 @@ test("GET and PUT /api/llm/structured-fallback expose the global fallback config
     model: "deepseek-chat",
     temperature: 0.2,
     maxTokens: null,
+    retryCount: 1,
   });
   structuredFallbackSettings.saveStructuredFallbackSettings = async (input) => {
     savedPayload = input;
@@ -406,6 +407,7 @@ test("GET and PUT /api/llm/structured-fallback expose the global fallback config
       model: "gpt-4o-mini",
       temperature: 0.15,
       maxTokens: 2048,
+      retryCount: 2,
     };
   };
 
@@ -431,6 +433,7 @@ test("GET and PUT /api/llm/structured-fallback expose the global fallback config
         model: "gpt-4o-mini",
         temperature: 0.15,
         maxTokens: 2048,
+        retryCount: 2,
       }),
     });
     assert.equal(putResponse.status, 200);
@@ -442,10 +445,12 @@ test("GET and PUT /api/llm/structured-fallback expose the global fallback config
       model: "gpt-4o-mini",
       temperature: 0.15,
       maxTokens: 2048,
+      retryCount: 2,
     });
     assert.equal(putPayload.data.enabled, true);
     assert.equal(putPayload.data.provider, "openai");
     assert.equal(putPayload.data.maxTokens, 2048);
+    assert.equal(putPayload.data.retryCount, 2);
   } finally {
     structuredFallbackSettings.getStructuredFallbackSettings = originalGetStructuredFallbackSettings;
     structuredFallbackSettings.saveStructuredFallbackSettings = originalSaveStructuredFallbackSettings;
@@ -583,9 +588,9 @@ test("GET /api/settings/api-keys uses lightweight local model metadata", async (
     assert.equal(payload.success, true);
     const deepseek = payload.data.find((item) => item.provider === "deepseek");
     assert.ok(deepseek);
-    assert.equal(deepseek.currentModel, "deepseek-v4-flash");
+    assert.equal(deepseek.currentModel, "deepseek-flash");
     assert.equal(deepseek.isConfigured, true);
-    assert.ok(deepseek.models.includes("deepseek-v4-flash"));
+    assert.ok(deepseek.models.includes("deepseek-flash"));
   } finally {
     prisma.aPIKey.findMany = originalFindMany;
     global.fetch = originalFetch;
@@ -670,6 +675,7 @@ test("GET /api/settings/api-keys exposes custom OpenAI-compatible providers", as
       baseURL: "https://gateway.example.com/v1",
       isActive: true,
       reasoningEnabled: true,
+      availableModels: JSON.stringify(["story-model", "story-model-pro"]),
       concurrencyLimit: 3,
       requestIntervalMs: 5000,
       createdAt: new Date(),
@@ -692,6 +698,7 @@ test("GET /api/settings/api-keys exposes custom OpenAI-compatible providers", as
     assert.equal(custom.displayName, "StoryHub Gateway");
     assert.equal(custom.currentModel, "story-model");
     assert.equal(custom.currentBaseURL, "https://gateway.example.com/v1");
+    assert.deepEqual(custom.models, ["story-model", "story-model-pro"]);
     assert.equal(custom.requiresApiKey, false);
     assert.equal(custom.isConfigured, true);
     assert.equal(custom.reasoningEnabled, true);
@@ -909,18 +916,22 @@ test("POST /api/settings/custom-providers creates a custom provider entry", asyn
   const originalCreate = prisma.aPIKey.create;
   const originalFetch = global.fetch;
   const httpFetch = originalFetch.bind(global);
+  let createdData;
   prisma.aPIKey.findUnique = async () => null;
-  prisma.aPIKey.create = async ({ data }) => ({
-    id: "api-key-custom-created",
-    provider: data.provider,
-    displayName: data.displayName,
-    key: data.key,
-    model: data.model,
-    baseURL: data.baseURL,
-    isActive: data.isActive,
-    createdAt: new Date(),
-    updatedAt: new Date(),
-  });
+  prisma.aPIKey.create = async ({ data }) => {
+    createdData = data;
+    return {
+      id: "api-key-custom-created",
+      provider: data.provider,
+      displayName: data.displayName,
+      key: data.key,
+      model: data.model,
+      baseURL: data.baseURL,
+      isActive: data.isActive,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+  };
   global.fetch = async () => new Response(JSON.stringify({
     data: [{ id: "story-model" }, { id: "story-model-pro" }],
   }), {
@@ -952,6 +963,7 @@ test("POST /api/settings/custom-providers creates a custom provider entry", asyn
     assert.equal(payload.data.baseURL, "https://gateway.example.com/v1");
     assert.ok(payload.data.provider.startsWith("custom_storyhub_gateway"));
     assert.ok(payload.data.models.includes("story-model"));
+    assert.deepEqual(JSON.parse(createdData.availableModels), ["story-model", "story-model-pro"]);
   } finally {
     prisma.aPIKey.findUnique = originalFindUnique;
     prisma.aPIKey.create = originalCreate;
@@ -1206,7 +1218,28 @@ test("creative hub thread create and state routes return success payloads", asyn
   }
 });
 
-test("novel routes preserve book framing fields through create-get-update cycle", async () => {
+test("novel routes preserve book framing fields through create-get-update cycle", async (t) => {
+  const { ensureSystemResourceStarterData } = require("../dist/services/bootstrap/SystemResourceBootstrapService.js");
+  await ensureSystemResourceStarterData();
+  const genre = await prisma.novelGenre.findFirst();
+  const modes = await prisma.novelStoryMode.findMany({ take: 2 });
+  assert.ok(genre);
+  assert.equal(modes.length, 2);
+  const { NovelCreateResourceRecommendationService } = require("../dist/services/novel/NovelCreateResourceRecommendationService.js");
+  const originalRecommend = NovelCreateResourceRecommendationService.prototype.recommendFromOptions;
+  t.after(() => { NovelCreateResourceRecommendationService.prototype.recommendFromOptions = originalRecommend; });
+  NovelCreateResourceRecommendationService.prototype.recommendFromOptions = async (input, options) => {
+    assert.equal(input.genreId, genre.id);
+    const selected = (choices, id) => ({ ...choices.find(item => item.id === id), reason: "测试模型的结构化推荐" });
+    return {
+      summary: "沿用测试所选创作基础",
+      genre: selected(options.genres, genre.id),
+      primaryStoryMode: selected(options.storyModes, modes[0].id),
+      secondaryStoryMode: selected(options.storyModes, modes[1].id),
+      powerSystem: { mode: "none", reason: "现实题材", source: "ai_recommended" },
+      caution: null, recommendedAt: new Date().toISOString(),
+    };
+  };
   const app = createApp();
   const server = http.createServer(app);
   const port = await listen(server);
@@ -1220,6 +1253,9 @@ test("novel routes preserve book framing fields through create-get-update cycle"
       },
       body: JSON.stringify({
         title: `book-framing-route-${Date.now()}`,
+        genreId: genre.id,
+        primaryStoryModeId: modes[0].id,
+        secondaryStoryModeId: modes[1].id,
         description: "测试书级 framing roundtrip。",
         targetAudience: "爱看都市高压逆袭的读者",
         bookSellingPoint: "每次现实困局都会撬动更大的利益链。",

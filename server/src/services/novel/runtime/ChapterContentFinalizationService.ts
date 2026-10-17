@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { ChapterRuntimePackage, GenerationContextPackage } from "@ai-novel/shared/types/chapterRuntime";
+import type { ChapterAcceptanceAssessmentResult } from "./ChapterAcceptanceAssessmentService";
 import { novelEventBus } from "../../../events";
 import { openConflictService } from "../../state/OpenConflictService";
 import { directorAutomationLedgerEventService } from "../director/runtime/DirectorAutomationLedgerEventService";
@@ -25,7 +26,8 @@ export interface ChapterContentFinalizationAgentRuntime {
 }
 
 export interface ChapterContentFinalizationServiceDeps {
-  qualityGateService: Pick<ChapterQualityGateService, "runAcceptanceGate">;
+  qualityGateService: Pick<ChapterQualityGateService, "runAcceptanceGate">
+    & Partial<Pick<ChapterQualityGateService, "persistAcceptanceResult">>;
   artifactSyncService: Pick<ChapterArtifactSyncService, "syncChapterArtifacts">;
   plannerService: ChapterRuntimePlannerPort;
   agentRuntime: ChapterContentFinalizationAgentRuntime;
@@ -39,11 +41,15 @@ export interface FinalizeChapterContentInput {
   request: ChapterRuntimeRequestInput;
   contextPackage: GenerationContextPackage;
   content: string;
+  repairReviewBaseline?: Parameters<ChapterQualityGateService["runAcceptanceGate"]>[0]["repairReviewBaseline"];
+  styleRewriteBaseline?: Parameters<ChapterQualityGateService["runAcceptanceGate"]>[0]["styleRewriteBaseline"];
   lengthControl?: ChapterRuntimePackage["lengthControl"];
   runId: string | null;
   startMs: number | null;
   deferArtifactBackgroundSync?: boolean;
   scheduleDeferredArtifactBackgroundSync?: boolean;
+  deferTerminalCommit?: boolean;
+  assertExecutionOwnership?: () => Promise<void>;
 }
 
 export interface FinalizeChapterContentResult {
@@ -51,10 +57,27 @@ export interface FinalizeChapterContentResult {
   runtimePackage: ChapterRuntimePackage;
   styleReview: StyleReviewResult;
   needsRepair: boolean;
+  acceptanceResult?: ChapterAcceptanceAssessmentResult;
+  acceptancePersistenceDeferred?: boolean;
+}
+
+export interface CommitFinalizedChapterContentInput {
+  novelId: string;
+  chapterId: string;
+  request: ChapterRuntimeRequestInput;
+  contextPackage: GenerationContextPackage;
+  runId: string | null;
+  startMs: number | null;
+  deferArtifactBackgroundSync?: boolean;
+  scheduleDeferredArtifactBackgroundSync?: boolean;
+  evaluation: Pick<FinalizeChapterContentResult, "finalContent" | "runtimePackage" | "needsRepair">
+    & Partial<Pick<FinalizeChapterContentResult, "acceptanceResult" | "acceptancePersistenceDeferred">>;
+  assertExecutionOwnership?: () => Promise<void>;
 }
 
 export class ChapterContentFinalizationService {
-  private readonly qualityGateService: Pick<ChapterQualityGateService, "runAcceptanceGate">;
+  private readonly qualityGateService: Pick<ChapterQualityGateService, "runAcceptanceGate">
+    & Partial<Pick<ChapterQualityGateService, "persistAcceptanceResult">>;
   private readonly artifactSyncService: Pick<ChapterArtifactSyncService, "syncChapterArtifacts">;
   private readonly plannerService: ChapterRuntimePlannerPort;
   private readonly agentRuntime: ChapterContentFinalizationAgentRuntime;
@@ -72,13 +95,18 @@ export class ChapterContentFinalizationService {
 
   async finalizeChapterContent(input: FinalizeChapterContentInput): Promise<FinalizeChapterContentResult> {
     const finalContent = input.content;
+    await input.assertExecutionOwnership?.();
     const acceptance = await this.qualityGateService.runAcceptanceGate({
       novelId: input.novelId,
       chapterId: input.chapterId,
       contextPackage: input.contextPackage,
       content: finalContent,
       request: input.request,
+      persistAssessment: !input.deferTerminalCommit,
+      repairReviewBaseline: input.repairReviewBaseline,
+      styleRewriteBaseline: input.styleRewriteBaseline,
     });
+    await input.assertExecutionOwnership?.();
     const proseQualityReport = detectProseQuality(finalContent);
     const proseQualityAuditReport = buildProseQualityAuditReport({
       novelId: input.novelId,
@@ -96,7 +124,8 @@ export class ChapterContentFinalizationService {
         : acceptance.auditReports,
     };
     const styleReview: StyleReviewResult = {
-      report: null,
+      report: acceptance.styleReviewReport ?? null,
+      signalScan: acceptance.styleSignalScan,
       autoRewritten: false,
       originalContent: null,
       finalContent,
@@ -123,6 +152,36 @@ export class ChapterContentFinalizationService {
     const needsRepair = acceptance.assessment.status === "repairable"
       || acceptance.assessment.status === "needs_manual_review"
       || runtimePackage.audit.hasBlockingIssues;
+    const result = {
+      finalContent,
+      runtimePackage,
+      styleReview,
+      needsRepair,
+      acceptanceResult: acceptance,
+      acceptancePersistenceDeferred: Boolean(input.deferTerminalCommit),
+    };
+    if (!input.deferTerminalCommit) {
+      await this.commitFinalizedChapterContent({
+        ...input,
+        evaluation: result,
+      });
+    }
+    return result;
+  }
+
+  async commitFinalizedChapterContent(input: CommitFinalizedChapterContentInput): Promise<void> {
+    const { finalContent, runtimePackage, needsRepair } = input.evaluation;
+    await input.assertExecutionOwnership?.();
+    if (input.evaluation.acceptancePersistenceDeferred && input.evaluation.acceptanceResult) {
+      await this.qualityGateService.persistAcceptanceResult?.({
+        novelId: input.novelId,
+        chapterId: input.chapterId,
+        contextPackage: input.contextPackage,
+        content: finalContent,
+        request: input.request,
+      }, input.evaluation.acceptanceResult);
+      await input.assertExecutionOwnership?.();
+    }
     const timelineFinalization = await this.timelineFinalizer.finalizeCurrentContent({
       novelId: input.novelId,
       chapterId: input.chapterId,
@@ -136,10 +195,12 @@ export class ChapterContentFinalizationService {
     if (!timelineFinalization.checkpointWritten) {
       throw new Error("Chapter timeline finalization is still running");
     }
+    await input.assertExecutionOwnership?.();
     await this.markChapterStatus(input.chapterId, needsRepair ? "needs_repair" : "pending_review");
     if (!needsRepair) {
       // 保证义务账本在下一章 JIT 上下文组装前完成；失败只告警，不阻断定稿返回。
       try {
+        await input.assertExecutionOwnership?.();
         await this.writeAcceptedFacts(
           input.novelId,
           input.chapterId,
@@ -158,6 +219,7 @@ export class ChapterContentFinalizationService {
     }
 
     if (!needsRepair && input.deferArtifactBackgroundSync && input.scheduleDeferredArtifactBackgroundSync !== false) {
+      await input.assertExecutionOwnership?.();
       await this.artifactSyncService.syncChapterArtifacts(
         input.novelId,
         input.chapterId,
@@ -171,6 +233,7 @@ export class ChapterContentFinalizationService {
           model: input.request.model,
         },
       );
+      await input.assertExecutionOwnership?.();
     }
 
     await this.finishTraceRun(input.runId, finalContent.length, input.startMs);
@@ -186,12 +249,6 @@ export class ChapterContentFinalizationService {
       });
     }
 
-    return {
-      finalContent,
-      runtimePackage,
-      styleReview,
-      needsRepair,
-    };
   }
 
   async finishTraceRun(runId: string | null, contentLength: number, startMs: number | null): Promise<void> {

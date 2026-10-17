@@ -1,5 +1,5 @@
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
-import type { ChapterTaskSheetQualityMode } from "@ai-novel/shared/types/chapterTaskSheetQuality";
+import type { ChapterTaskSheetQualityMode, ChapterTaskSheetQualityGateResult, AiChapterTaskSheetQualityAssessment } from "@ai-novel/shared/types/chapterTaskSheetQuality";
 import type { DirectorCompletionProfile } from "@ai-novel/shared/types/directorCompletion";
 import type {
   VolumeChapterListGenerationMode,
@@ -68,14 +68,23 @@ export interface VolumeGenerationNovel {
     name: string;
   } | null;
   characters: Array<{
+    id?: string;
     name: string;
     role: string;
+    castRole?: string | null;
     currentGoal: string | null;
     currentState: string | null;
   }>;
 }
 
 export interface VolumeGenerateOptions {
+  /** Explicit author revision; automatic recovery can still reuse saved contracts. */
+  forceRegenerate?: boolean;
+  onChapterTaskSheetQuality?: (event: {
+    chapterId: string; chapterOrder: number;
+    result: ChapterTaskSheetQualityGateResult;
+    assessment?: AiChapterTaskSheetQualityAssessment;
+  }) => void | Promise<void>;
   provider?: LLMProvider;
   model?: string;
   temperature?: number;

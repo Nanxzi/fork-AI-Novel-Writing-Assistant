@@ -116,6 +116,14 @@ async function inspectScopedChapterStateCommitFacts(context: WorkflowStepExecuti
   };
 }
 
+function countClosedChapterExecutionBoundaries(progress: Awaited<ReturnType<typeof inspectScopedChapterExecutionProgress>>) {
+  return progress?.chapters?.filter((chapter) => (
+    chapter.completedStages.includes("chapter_artifacts_synced")
+    && chapter.completedStages.includes("chapter_state_committed")
+    && chapter.completedStages.includes("reviewable_or_approved")
+  )).length ?? 0;
+}
+
 function createChapterDraftExecutableModule(
   descriptor: WorkflowStepModuleDescriptor,
 ): WorkflowStepModule<ChapterDraftStepInput, ChapterDraftStepOutput> {
@@ -174,19 +182,22 @@ function createChapterDraftExecutableModule(
         const chapterProgress = await inspectFreshScopedProgress({ novelId, state, request });
         const draftedChapterCount = chapterProgress?.draftedChapterCount ?? 0;
         const totalChapters = chapterProgress?.totalChapters ?? 0;
-        return totalChapters > 0 && draftedChapterCount >= totalChapters
+        const closedChapterCount = countClosedChapterExecutionBoundaries(chapterProgress);
+        return totalChapters > 0 && closedChapterCount >= totalChapters
           ? completedFact(descriptor.id, {
             evidence: {
               draftedChapterCount,
+              closedChapterCount,
               approvedChapterCount: chapterProgress?.approvedChapterCount ?? 0,
               completedChapters: chapterProgress?.completedChapters ?? 0,
               totalChapters,
             },
           })
           : pendingFact(descriptor.id, {
-            ratio: totalChapters > 0 ? Math.min(1, draftedChapterCount / totalChapters) : 0,
+            ratio: totalChapters > 0 ? Math.min(1, closedChapterCount / totalChapters) : 0,
             evidence: {
               draftedChapterCount,
+              closedChapterCount,
               approvedChapterCount: chapterProgress?.approvedChapterCount ?? 0,
               completedChapters: chapterProgress?.completedChapters ?? 0,
               needsRepairChapters: chapterProgress?.needsRepairChapters ?? 0,
@@ -214,8 +225,8 @@ function createChapterDraftExecutableModule(
           taskId: state.task.id,
           novelId,
           request: directorRequest,
-          existingPipelineJobId: state.seedPayload.autoExecution?.pipelineJobId ?? null,
-          existingState: state.seedPayload.autoExecution ?? null,
+          existingPipelineJobId: state.run.autoExecution?.pipelineJobId ?? null,
+          existingState: state.run.autoExecution ?? null,
           resumeCheckpointType: (
             state.task.checkpointType === "chapter_batch_ready"
             || state.task.checkpointType === "replan_required"
@@ -257,7 +268,7 @@ function createChapterDraftExecutableModule(
         const hasCompletedDraftScope = Boolean(
           progress
           && progress.totalChapters > 0
-          && progress.draftedChapterCount >= progress.totalChapters,
+          && countClosedChapterExecutionBoundaries(progress) >= progress.totalChapters,
         );
         if (!hasObservedDraft) {
           // The scoped chapters have no saved draft content. The "no draft"
@@ -306,6 +317,7 @@ function createChapterDraftExecutableModule(
           valid: true,
           evidence: {
             draftedChapterCount: progress?.draftedChapterCount ?? 0,
+            closedChapterCount: countClosedChapterExecutionBoundaries(progress),
             totalChapters: progress?.totalChapters ?? 0,
           },
         };
@@ -340,16 +352,18 @@ function createChapterDraftExecutableModule(
             nextAction: "run_chapter_execution",
           });
         }
-        const draftedRatio = progress.totalChapters > 0
-          ? Math.min(1, progress.draftedChapterCount / progress.totalChapters)
+        const closedChapterCount = countClosedChapterExecutionBoundaries(progress);
+        const closedRatio = progress.totalChapters > 0
+          ? Math.min(1, closedChapterCount / progress.totalChapters)
           : 0;
-        if (progress.totalChapters > 0 && progress.draftedChapterCount >= progress.totalChapters) {
+        if (progress.totalChapters > 0 && closedChapterCount >= progress.totalChapters) {
           return buildSimpleProgress({
             status: "completed",
             ratio: 1,
-            label: "\u6b63\u6587\u5df2\u5168\u90e8\u751f\u6210",
+            label: "\u7ae0\u8282\u6267\u884c\u5df2\u5168\u90e8\u95ed\u5408",
             evidence: {
               draftedChapterCount: progress.draftedChapterCount,
+              closedChapterCount,
               approvedChapterCount: progress.approvedChapterCount,
               completedChapters: progress.completedChapters,
               totalChapters: progress.totalChapters,
@@ -360,7 +374,7 @@ function createChapterDraftExecutableModule(
         }
         return buildSimpleProgress({
           status: "partially_done",
-          ratio: draftedRatio,
+          ratio: closedRatio,
           label: progress.activeChapterOrder
             ? `\u6b63\u5728\u63a8\u8fdb\u7b2c ${progress.activeChapterOrder} \u7ae0`
             : progress.currentChapterOrder
@@ -370,6 +384,7 @@ function createChapterDraftExecutableModule(
             activeChapterOrder: progress.activeChapterOrder,
             currentChapterOrder: progress.currentChapterOrder,
             draftedChapterCount: progress.draftedChapterCount,
+            closedChapterCount,
             approvedChapterCount: progress.approvedChapterCount,
             completedChapters: progress.completedChapters,
             needsRepairChapters: progress.needsRepairChapters,
@@ -399,7 +414,7 @@ function createChapterDraftExecutableModule(
         return Boolean(
           progress
           && progress.totalChapters > 0
-          && progress.draftedChapterCount >= progress.totalChapters,
+          && countClosedChapterExecutionBoundaries(progress) >= progress.totalChapters,
         );
       },
       acceptablePauseCriteria: async (_output, context) => {
@@ -600,12 +615,8 @@ function chapterHasCompletedStage(
 
 async function isAutoQualityReviewDisabled(context: WorkflowStepExecutionContext): Promise<boolean> {
   const { state, request } = await loadDirectorModuleState(context, { requireNovel: false });
-  const seedPayload = state.seedPayload as {
-    autoExecution?: { autoReview?: unknown } | null;
-    autoExecutionPlan?: { autoReview?: unknown } | null;
-  };
-  return seedPayload.autoExecution?.autoReview === false
-    || seedPayload.autoExecutionPlan?.autoReview === false
+  return state.run.autoExecution?.autoReview === false
+    || state.launch.autoExecutionPlan?.autoReview === false
     || request?.autoExecutionPlan?.autoReview === false;
 }
 

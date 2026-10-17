@@ -37,7 +37,7 @@ function formatConnectionTestResult(response: Awaited<ReturnType<typeof testLLMC
   return `连接成功，总耗时 ${latency}ms · ${plainText} · ${structuredText}`;
 }
 
-export default function SettingsPage() {
+export default function SettingsPage({ embedded = false }: { embedded?: boolean }) {
   const queryClient = useQueryClient();
   const [editingProvider, setEditingProvider] = useState("");
   const [isCreatingCustomProvider, setIsCreatingCustomProvider] = useState(false);
@@ -99,6 +99,8 @@ export default function SettingsPage() {
       queryClient.invalidateQueries({ queryKey: queryKeys.settings.apiKeys }),
       queryClient.invalidateQueries({ queryKey: queryKeys.settings.apiKeyBalances }),
       queryClient.invalidateQueries({ queryKey: queryKeys.llm.providers }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.settings.quickSetup }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.onboarding.firstNovel }),
     ]);
   };
 
@@ -445,14 +447,15 @@ export default function SettingsPage() {
     <div className={AUTO_DIRECTOR_MOBILE_CLASSES.settingsPageRoot}>
       <div className="space-y-4">
         <ProviderSettingsSection
+          embedded={embedded}
           providers={providerConfigs}
           balances={providerBalancesQuery.data?.data ?? []}
           isBalanceLoading={providerBalancesQuery.isLoading}
-          testingProvider={testMutation.variables?.provider}
+          testingProvider={testMutation.isPending ? testMutation.variables?.provider : undefined}
           providerTestResults={providerTestResults}
-          refreshingModelProvider={refreshModelsMutation.variables}
-          refreshingBalanceProvider={refreshBalanceMutation.variables}
-          reasoningProvider={modelControlsMutation.variables?.provider}
+          refreshingModelProvider={refreshModelsMutation.isPending ? refreshModelsMutation.variables : undefined}
+          refreshingBalanceProvider={refreshBalanceMutation.isPending ? refreshBalanceMutation.variables : undefined}
+          reasoningProvider={modelControlsMutation.isPending ? modelControlsMutation.variables?.provider : undefined}
           onCreateCustomProvider={openCreateCustomDialog}
           onRemoveProvider={handleRemoveProvider}
           onOpenConfig={openBuiltInDialog}
@@ -479,7 +482,7 @@ export default function SettingsPage() {
             setActionResult("");
             modelControlsMutation.mutate({ provider, hiddenModels, message });
           }}
-          removingProvider={removeProviderMutation.variables?.provider}
+          removingProvider={removeProviderMutation.isPending ? removeProviderMutation.variables?.provider : undefined}
         />
       </div>
 

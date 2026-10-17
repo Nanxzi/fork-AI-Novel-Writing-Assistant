@@ -31,7 +31,7 @@ import {
   parseLooseTextList,
   splitParagraphsWithRanges,
   type ChapterEditorParagraph,
-} from "./chapterEditorShared";
+} from "./context";
 
 type LoadedWorkspaceNovel = NonNullable<Awaited<ReturnType<NovelCoreService["getNovelById"]>>>;
 
@@ -147,9 +147,13 @@ function normalizeSnapshotDates(snapshot: Awaited<ReturnType<NovelCoreService["g
 
 function mapDiagnosticCard(
   card: {
+    sourceIssueId?: string;
     title: string;
     problemSummary: string;
     whyItMatters: string;
+    repairGoal?: string;
+    repairApproach?: string;
+    mustPreserve?: string[];
     recommendedAction: ChapterEditorDiagnosticCard["recommendedAction"];
     recommendedScope: ChapterEditorDiagnosticCard["recommendedScope"];
     paragraphStart?: number | null;
@@ -158,14 +162,19 @@ function mapDiagnosticCard(
     sourceTags: string[];
   },
   paragraphs: ChapterEditorParagraph[],
+  sourceIssueIds: ReadonlySet<string>,
 ): ChapterEditorDiagnosticCard {
   const start = card.paragraphStart ?? null;
   const end = card.paragraphEnd ?? start;
   return {
     id: randomUUID(),
+    sourceIssueId: card.sourceIssueId && sourceIssueIds.has(card.sourceIssueId) ? card.sourceIssueId : null,
     title: card.title,
     problemSummary: card.problemSummary,
     whyItMatters: card.whyItMatters,
+    repairGoal: card.repairGoal,
+    repairApproach: card.repairApproach,
+    mustPreserve: card.mustPreserve,
     recommendedAction: card.recommendedAction,
     recommendedScope: card.recommendedScope,
     anchorRange: buildAnchorRangeFromParagraphBounds(paragraphs, start, end),
@@ -331,6 +340,7 @@ export class ChapterEditorWorkspaceService {
             text: trimPromptText(paragraph.text),
           })),
           openIssues: context.openAuditIssues.slice(0, 8).map((issue) => ({
+            id: issue.id,
             severity: issue.severity,
             auditType: issue.auditType,
             code: issue.code,
@@ -344,7 +354,8 @@ export class ChapterEditorWorkspaceService {
         },
       });
 
-      const diagnosticCards = result.output.cards.map((card) => mapDiagnosticCard(card, context.paragraphs));
+      const sourceIssueIds = new Set(context.openAuditIssues.map((issue) => issue.id));
+      const diagnosticCards = result.output.cards.map((card) => mapDiagnosticCard(card, context.paragraphs, sourceIssueIds));
       const recommendedTask = mapRecommendedTask(result.output.recommendedTask, diagnosticCards, context.paragraphs);
 
       return {

@@ -11,7 +11,18 @@ import type {
   PipelinePayload,
 } from "../novelCoreShared";
 import type { ContentProvenance } from "@ai-novel/shared/types/canonicalState";
-import { buildContentHash, ChapterArtifactDeltaService } from "./ChapterArtifactDeltaService";
+import type { LLMProvider } from "@ai-novel/shared/types/llm";
+import { buildContentHash } from "./ChapterArtifactDeltaService";
+import { CHAPTER_ARTIFACT_BOUNDARY_TYPE } from "./artifactSync/ChapterArtifactSyncBoundary";
+import {
+  ChapterArtifactRecoveryPendingError,
+  ChapterArtifactRecoveryService,
+} from "./artifactSync/ChapterArtifactRecoveryService";
+import {
+  ChapterArtifactContentVersionError,
+  CharacterCandidateReviewRequiredError,
+  type ChapterArtifactSyncResult,
+} from "./artifactSync/ChapterArtifactSyncResult";
 
 interface ChapterBackgroundSyncContext {
   chapterId: string;
@@ -20,6 +31,11 @@ interface ChapterBackgroundSyncContext {
 }
 
 interface ChapterArtifactBackgroundSyncOptions {
+  artifactSyncPolicy?: "director_v2";
+  checkpointScope?: string;
+  manualRevision?: string;
+  revisionGuard?: {id: string; metadataJson: string | null; novel?: {directorEpoch: number; directorVersion: string | null}};
+  directorRunId?: string;
   artifactSyncMode?: ArtifactSyncMode;
   provider?: string;
   model?: string;
@@ -32,10 +48,11 @@ type ArtifactSyncClaimStatus = "claimed" | "already_done" | "running";
 const DEFAULT_ARTIFACT_SYNC_MODE: ArtifactSyncMode = "adaptive";
 const DEFERRED_SYNC_DELAY_MS = 5000;
 const ARTIFACT_SYNC_RUNNING_STALE_MS = 15 * 60 * 1000;
+const RECOVERABLE_ARTIFACT_DELTA_TYPE = "artifact_delta_recoverable:v1";
 
 export class ChapterArtifactBackgroundSyncService {
-  private artifactDeltaService: ChapterArtifactDeltaService | null = null;
-  private readonly activeSyncKeys = new Set<string>();
+  private artifactRecoveryService: ChapterArtifactRecoveryService | null = null;
+  private readonly activeSyncs = new Map<string, Promise<ChapterArtifactSyncResult>>();
   private readonly latestSyncedContentHashByChapter = new Map<string, string>();
 
   scheduleChapterSync(
@@ -65,31 +82,74 @@ export class ChapterArtifactBackgroundSyncService {
     chapterId: string,
     content: string,
     options: ChapterArtifactBackgroundSyncOptions = {},
-  ): Promise<void> {
+  ): Promise<ChapterArtifactSyncResult> {
     const artifactSyncMode = options.artifactSyncMode ?? DEFAULT_ARTIFACT_SYNC_MODE;
     const contentHash = buildContentHash(content);
-    const chapterKey = `${novelId}:${chapterId}:${artifactSyncMode}`;
+    const chapterKey = `${novelId}:${chapterId}:${artifactSyncMode}:${options.artifactSyncPolicy ?? "legacy"}:${options.directorRunId ?? ""}:${options.checkpointScope ?? ""}`;
     const syncKey = `${chapterKey}:${contentHash}`;
-    if (
-      this.activeSyncKeys.has(syncKey)
-      || this.latestSyncedContentHashByChapter.get(chapterKey) === contentHash
-    ) {
-      return;
+    const activeSync = this.activeSyncs.get(syncKey);
+    if (activeSync) {
+      return activeSync;
     }
-    this.activeSyncKeys.add(syncKey);
-    try {
-      await this.runChapterSync(novelId, chapterId, content, artifactSyncMode, contentHash, options);
-      this.latestSyncedContentHashByChapter.set(chapterKey, contentHash);
-    } catch (error) {
-      console.warn("[chapter-artifact-background-sync] background sync failed", {
+    if (this.latestSyncedContentHashByChapter.get(chapterKey) === contentHash) {
+      if (options.artifactSyncPolicy === "director_v2") {
+        const current = await prisma.chapter.findFirst({where: {id: chapterId, novelId}, select: {content: true}});
+        if (!current || buildContentHash(current.content ?? "") !== contentHash) {
+          return {status: "failed", contentHash, completedArtifacts: [], reason: "正文版本已变化，请完成当前正文的资源回填后继续。"};
+        }
+      }
+      return {
+        status: "completed",
+        contentHash,
+        completedArtifacts: ["artifact_delta"],
+      };
+    }
+    // Extraction, boundary persistence, and the local cache are one result
+    // boundary. Concurrent callers must receive that same final result.
+    const execution = (async (): Promise<ChapterArtifactSyncResult> => {
+      let result = await this.runChapterSync(
         novelId,
         chapterId,
+        content,
         artifactSyncMode,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      this.activeSyncKeys.delete(syncKey);
-    }
+        contentHash,
+        options,
+      ).catch((error): ChapterArtifactSyncResult => ({
+        status: "failed",
+        contentHash,
+        completedArtifacts: [],
+        reason: error instanceof Error ? error.message : String(error),
+      }));
+      if (result.status === "completed" || result.status === "degraded") {
+        try {
+          await this.recordContinuityBoundary({
+            novelId,
+            chapterId,
+            contentHash,
+            artifactSyncMode: options.checkpointScope ?? artifactSyncMode,
+            result,
+            revisionGuard: options.revisionGuard,
+          });
+        } catch (error) {
+          result = {
+            ...result,
+            status: "failed",
+            reason: `无法保存当前正文的资产完成边界：${error instanceof Error ? error.message : String(error)}`,
+          };
+        }
+      }
+      if (result.status === "completed") {
+        this.latestSyncedContentHashByChapter.set(chapterKey, contentHash);
+      }
+      return result;
+    })();
+    this.activeSyncs.set(syncKey, execution);
+    void execution.finally(() => {
+      if (this.activeSyncs.get(syncKey) === execution) {
+        this.activeSyncs.delete(syncKey);
+      }
+    });
+    return execution;
   }
 
   private async runChapterSync(
@@ -99,38 +159,16 @@ export class ChapterArtifactBackgroundSyncService {
     artifactSyncMode: ArtifactSyncMode,
     contentHash: string,
     options: ChapterArtifactBackgroundSyncOptions,
-  ): Promise<void> {
+  ): Promise<ChapterArtifactSyncResult> {
     const chapter = await prisma.chapter.findFirst({
       where: { id: chapterId, novelId },
-      select: { id: true, order: true, title: true },
+      select: { id: true, order: true, title: true, content: true },
     });
     if (!chapter) {
-      return;
+      return { status: "failed", contentHash, completedArtifacts: [], reason: "章节不存在，无法同步当前正文资产。" };
     }
-    if (await this.hasCompletedCheckpoint({
-      novelId,
-      chapterId,
-      contentHash,
-      artifactType: "artifact_delta",
-      syncMode: artifactSyncMode,
-    })) {
-      return;
-    }
-    const deltaClaim = await this.claimCheckpoint({
-      novelId,
-      chapterId,
-      contentHash,
-      artifactType: "artifact_delta",
-      syncMode: artifactSyncMode,
-      sourceType: "chapter_background_sync",
-      sourceStage: "chapter_execution",
-      metadata: {
-        reason: "artifact_delta_started",
-        contentProvenance: options.contentProvenance ?? "confirmed",
-      },
-    });
-    if (deltaClaim !== "claimed") {
-      return;
+    if (buildContentHash(chapter.content ?? "") !== contentHash) {
+      return { status: "failed", contentHash, completedArtifacts: [], reason: "章节正文版本已变化，已拒绝过期资产同步结果。" };
     }
     const context: ChapterBackgroundSyncContext = {
       chapterId,
@@ -140,12 +178,49 @@ export class ChapterArtifactBackgroundSyncService {
 
     let deltaMetadata: Record<string, unknown> = {};
     let requiresFullReconcileFromDelta = false;
-    try {
-      await this.runTrackedActivity(novelId, context, "artifact_delta", async () => {
-        const result = await this.getArtifactDeltaService().syncChapterArtifacts({
+    const completedDeltaMetadata = await this.getCompletedCheckpointMetadata({
+      novelId,
+      chapterId,
+      contentHash,
+      artifactType: RECOVERABLE_ARTIFACT_DELTA_TYPE,
+      syncMode: options.checkpointScope ?? artifactSyncMode,
+    });
+    if (completedDeltaMetadata) {
+      deltaMetadata = completedDeltaMetadata;
+      requiresFullReconcileFromDelta = completedDeltaMetadata.requiresFullReconcile === true;
+    } else {
+      const deltaClaim = await this.claimCheckpoint({
+        novelId,
+        chapterId,
+        contentHash,
+        artifactType: RECOVERABLE_ARTIFACT_DELTA_TYPE,
+        syncMode: options.checkpointScope ?? artifactSyncMode,
+        sourceType: "chapter_background_sync",
+        sourceStage: "chapter_execution",
+        metadata: {
+          reason: "artifact_delta_started",
+          contentProvenance: options.contentProvenance ?? "confirmed",
+        },
+      });
+      if (deltaClaim === "running") {
+        return {
+          status: options.artifactSyncPolicy === "director_v2" || artifactSyncMode === "strict" ? "pending" : "degraded",
+          contentHash,
+          completedArtifacts: [],
+          reason: "同一正文版本的资产同步仍在运行。",
+        };
+      }
+      if (deltaClaim !== "already_done") {
+        try {
+          await this.runTrackedActivity(novelId, context, "artifact_delta", async () => {
+            const result = await this.getArtifactRecoveryService().syncChapterArtifacts({
           novelId,
           chapterId,
           content,
+          artifactSyncMode,
+          artifactSyncPolicy: options.artifactSyncPolicy,
+          checkpointScope: options.checkpointScope, manualRevision: options.manualRevision, revisionGuard: options.revisionGuard,
+          directorRunId: options.directorRunId,
           sourceType: "chapter_background_sync",
           sourceStage: "chapter_execution",
           provider: options.provider,
@@ -153,8 +228,8 @@ export class ChapterArtifactBackgroundSyncService {
           temperature: options.temperature,
           contentProvenance: options.contentProvenance,
         });
-        requiresFullReconcileFromDelta = result.requiresFullReconcile;
-        deltaMetadata = {
+            requiresFullReconcileFromDelta = result.requiresFullReconcile;
+            deltaMetadata = {
           stateSnapshotId: result.stateSnapshotId,
           characterResourceProposalCount: result.characterResourceProposalCount,
           characterDynamicsCount: result.characterDynamicsCount,
@@ -164,37 +239,78 @@ export class ChapterArtifactBackgroundSyncService {
           concreteFactCount: result.concreteFactCount,
           syncPlan: result.output.syncPlan,
           confidence: result.output.confidence,
+          requiresFullReconcile: result.requiresFullReconcile,
           contentProvenance: options.contentProvenance ?? "confirmed",
-        };
-      });
-    } catch (error) {
-      await this.markCheckpointFailed({
+            };
+          });
+        } catch (error) {
+          if (error instanceof ChapterArtifactRecoveryPendingError) {
+            return {
+              status: "pending",
+              contentHash,
+              completedArtifacts: [],
+              reason: error.message,
+            };
+          }
+          await this.markCheckpointFailed({
         novelId,
         chapterId,
         contentHash,
-        artifactType: "artifact_delta",
-        syncMode: artifactSyncMode,
+        artifactType: RECOVERABLE_ARTIFACT_DELTA_TYPE,
+        syncMode: options.checkpointScope ?? artifactSyncMode,
         sourceType: "chapter_background_sync",
         sourceStage: "chapter_execution",
         metadata: { reason: error instanceof Error ? error.message : String(error) },
-      });
-      throw error;
+          });
+          if (error instanceof CharacterCandidateReviewRequiredError) {
+            return {status: "pending", contentHash, completedArtifacts: [], reason: error.message, characterReviewId: error.reviewId};
+          }
+          if (error instanceof ChapterArtifactContentVersionError) {
+            return {
+              status: "failed",
+              contentHash,
+              completedArtifacts: [],
+              reason: error.message,
+            };
+          }
+          return {
+            status: options.artifactSyncPolicy === "director_v2" ? "failed" : "degraded",
+            contentHash,
+            completedArtifacts: [],
+            reason: error instanceof Error ? error.message : String(error),
+          };
+        }
+        await this.markCheckpoint({
+          novelId,
+          chapterId,
+          contentHash,
+          artifactType: RECOVERABLE_ARTIFACT_DELTA_TYPE,
+          syncMode: options.checkpointScope ?? artifactSyncMode,
+          sourceType: "chapter_background_sync",
+          sourceStage: "chapter_execution",
+          metadata: deltaMetadata,
+        });
+      } else {
+        const completed = await this.getCompletedCheckpointMetadata({
+          novelId,
+          chapterId,
+          contentHash,
+          artifactType: RECOVERABLE_ARTIFACT_DELTA_TYPE,
+          syncMode: options.checkpointScope ?? artifactSyncMode,
+        });
+        // Older whole-delta checkpoints did not retain recovery metadata. They
+        // remain a completed delta, while strict mode still forces reconcile.
+        deltaMetadata = completed ?? {};
+        requiresFullReconcileFromDelta = completed?.requiresFullReconcile === true;
+      }
     }
-    await this.markCheckpoint({
-      novelId,
-      chapterId,
-      contentHash,
-      artifactType: "artifact_delta",
-      syncMode: artifactSyncMode,
-      sourceType: "chapter_background_sync",
-      sourceStage: "chapter_execution",
-      metadata: deltaMetadata,
-    });
 
     const shouldReconcile = await this.shouldRunPayoffFullReconcile({
       novelId,
       chapterOrder: chapter.order,
       artifactSyncMode,
+      artifactSyncPolicy: options.artifactSyncPolicy,
+          directorRunId: options.directorRunId,
       requiresFullReconcileFromDelta,
     });
     if (shouldReconcile && !(await this.hasCompletedCheckpoint({
@@ -202,43 +318,97 @@ export class ChapterArtifactBackgroundSyncService {
       chapterId,
       contentHash,
       artifactType: "payoff_ledger_full_reconcile",
-      syncMode: artifactSyncMode,
+      syncMode: options.checkpointScope ?? artifactSyncMode,
     }))) {
-      await this.runTrackedActivity(novelId, context, "payoff_ledger", async () => {
-        await payoffLedgerSyncService.syncLedger(novelId, {
-          chapterOrder: chapter.order,
-          sourceChapterId: chapterId,
-        });
-      });
-      await this.markCheckpoint({
+      const reconcileClaim = await this.claimCheckpoint({
         novelId,
         chapterId,
         contentHash,
         artifactType: "payoff_ledger_full_reconcile",
-        syncMode: artifactSyncMode,
+        syncMode: options.checkpointScope ?? artifactSyncMode,
         sourceType: "chapter_background_sync",
         sourceStage: "chapter_execution",
-        metadata: {
-          trigger: this.describePayoffReconcileTrigger({
-            chapterOrder: chapter.order,
-            artifactSyncMode,
-            requiresFullReconcileFromDelta,
-            isVolumeTail: await this.isVolumeTail(novelId, chapter.order),
-          }),
-        },
       });
+      if (reconcileClaim === "running") {
+        return {
+          status: artifactSyncMode === "strict" ? "pending" : "degraded",
+          contentHash,
+          completedArtifacts: ["artifact_delta"],
+          reason: "同一正文版本的伏笔账本对账仍在运行。",
+        };
+      }
+      if (reconcileClaim === "claimed") {
+        try {
+          await this.runTrackedActivity(novelId, context, "payoff_ledger", async () => {
+            await payoffLedgerSyncService.syncLedger(novelId, {
+              chapterOrder: chapter.order,
+              sourceChapterId: chapterId,
+              ...(options.artifactSyncPolicy === "director_v2" ? {
+                provider: options.provider as LLMProvider | undefined,
+                model: options.model,
+                temperature: options.temperature,
+                triggerReason: requiresFullReconcileFromDelta ? "artifact_delta_risk" : "volume_tail",
+              } : {}),
+            });
+          });
+          await this.markCheckpoint({
+            novelId,
+            chapterId,
+            contentHash,
+            artifactType: "payoff_ledger_full_reconcile",
+            syncMode: options.checkpointScope ?? artifactSyncMode,
+            sourceType: "chapter_background_sync",
+            sourceStage: "chapter_execution",
+            metadata: {
+              trigger: this.describePayoffReconcileTrigger({
+                chapterOrder: chapter.order,
+                artifactSyncMode,
+                artifactSyncPolicy: options.artifactSyncPolicy,
+          directorRunId: options.directorRunId,
+                requiresFullReconcileFromDelta,
+                isVolumeTail: await this.isVolumeTail(novelId, chapter.order),
+              }),
+            },
+          });
+        } catch (error) {
+          await this.markCheckpointFailed({
+            novelId,
+            chapterId,
+            contentHash,
+            artifactType: "payoff_ledger_full_reconcile",
+            syncMode: options.checkpointScope ?? artifactSyncMode,
+            sourceType: "chapter_background_sync",
+            sourceStage: "chapter_execution",
+            metadata: { reason: error instanceof Error ? error.message : String(error) },
+          });
+          return {
+            status: "degraded",
+            contentHash,
+            completedArtifacts: ["artifact_delta"],
+            reason: error instanceof Error ? error.message : String(error),
+          };
+        }
+      }
+      return {
+        status: "completed",
+        contentHash,
+        completedArtifacts: ["artifact_delta", "payoff_ledger_full_reconcile"],
+      };
     }
+    return { status: "completed", contentHash, completedArtifacts: ["artifact_delta"] };
   }
 
-  private getArtifactDeltaService(): ChapterArtifactDeltaService {
-    this.artifactDeltaService ??= new ChapterArtifactDeltaService();
-    return this.artifactDeltaService;
+  private getArtifactRecoveryService(): ChapterArtifactRecoveryService {
+    this.artifactRecoveryService ??= new ChapterArtifactRecoveryService();
+    return this.artifactRecoveryService;
   }
 
   private async shouldRunPayoffFullReconcile(input: {
     novelId: string;
     chapterOrder: number;
     artifactSyncMode: ArtifactSyncMode;
+    artifactSyncPolicy?: "director_v2";
+  directorRunId?: string;
     requiresFullReconcileFromDelta: boolean;
   }): Promise<boolean> {
     if (input.artifactSyncMode === "strict") {
@@ -250,7 +420,7 @@ export class ChapterArtifactBackgroundSyncService {
     if (input.artifactSyncMode === "deferred") {
       return false;
     }
-    if (input.chapterOrder > 0 && input.chapterOrder % 3 === 0) {
+    if (input.artifactSyncPolicy !== "director_v2" && input.chapterOrder > 0 && input.chapterOrder % 3 === 0) {
       return true;
     }
     return this.isVolumeTail(input.novelId, input.chapterOrder);
@@ -259,6 +429,8 @@ export class ChapterArtifactBackgroundSyncService {
   private describePayoffReconcileTrigger(input: {
     chapterOrder: number;
     artifactSyncMode: ArtifactSyncMode;
+    artifactSyncPolicy?: "director_v2";
+  directorRunId?: string;
     requiresFullReconcileFromDelta: boolean;
     isVolumeTail: boolean;
   }): string {
@@ -268,7 +440,7 @@ export class ChapterArtifactBackgroundSyncService {
     if (input.requiresFullReconcileFromDelta) {
       return "artifact_delta_risk";
     }
-    if (input.chapterOrder > 0 && input.chapterOrder % 3 === 0) {
+    if (input.artifactSyncPolicy !== "director_v2" && input.chapterOrder > 0 && input.chapterOrder % 3 === 0) {
       return "adaptive_three_chapter_checkpoint";
     }
     if (input.isVolumeTail) {
@@ -303,7 +475,7 @@ export class ChapterArtifactBackgroundSyncService {
     chapterId: string;
     contentHash: string;
     artifactType: string;
-    syncMode: ArtifactSyncMode;
+    syncMode: string;
   }): Promise<boolean> {
     const row = await prisma.chapterArtifactSyncCheckpoint.findUnique({
       where: {
@@ -320,12 +492,106 @@ export class ChapterArtifactBackgroundSyncService {
     return row?.status === "succeeded";
   }
 
+  private async getCompletedCheckpointMetadata(input: {
+    novelId: string;
+    chapterId: string;
+    contentHash: string;
+    artifactType: string;
+    syncMode: string;
+  }): Promise<Record<string, unknown> | null> {
+    const row = await prisma.chapterArtifactSyncCheckpoint.findUnique({
+      where: {
+        novelId_chapterId_contentHash_artifactType_syncMode: {
+          novelId: input.novelId,
+          chapterId: input.chapterId,
+          contentHash: input.contentHash,
+          artifactType: input.artifactType,
+          syncMode: input.syncMode,
+        },
+      },
+      select: { status: true, metadataJson: true },
+    }).catch(() => null);
+    if (row?.status !== "succeeded" || !row.metadataJson) {
+      return null;
+    }
+    try {
+      const metadata: unknown = JSON.parse(row.metadataJson);
+      return metadata && typeof metadata === "object" && !Array.isArray(metadata)
+        ? metadata as Record<string, unknown>
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async recordContinuityBoundary(input: {
+    novelId: string;
+    chapterId: string;
+    contentHash: string;
+    artifactSyncMode: string;
+    result: ChapterArtifactSyncResult;
+    revisionGuard?: {id: string; metadataJson: string | null; novel?: {directorEpoch: number; directorVersion: string | null}};
+  }): Promise<void> {
+    const persist = async (db: Pick<typeof prisma, "chapter" | "chapterArtifactSyncCheckpoint">) => {
+      if (input.revisionGuard) {
+        const current = await db.chapterArtifactSyncCheckpoint.updateMany({where: {...input.revisionGuard, status: "running"}, data: {updatedAt: new Date()}});
+        if (!current.count) throw new ChapterArtifactContentVersionError("修订版本已变化，请同步最新正文。");
+      }
+      const chapter = await db.chapter.findFirst({
+        where: { id: input.chapterId, novelId: input.novelId },
+        select: { content: true },
+      });
+      if (!chapter || buildContentHash(chapter.content ?? "") !== input.contentHash) {
+        throw new ChapterArtifactContentVersionError("章节正文版本已变化，无法保存过期的资产完成边界。");
+      }
+      await db.chapterArtifactSyncCheckpoint.upsert({
+        where: {
+          novelId_chapterId_contentHash_artifactType_syncMode: {
+            novelId: input.novelId,
+            chapterId: input.chapterId,
+            contentHash: input.contentHash,
+            artifactType: CHAPTER_ARTIFACT_BOUNDARY_TYPE,
+            syncMode: input.artifactSyncMode,
+          },
+        },
+        create: {
+          novelId: input.novelId,
+          chapterId: input.chapterId,
+          contentHash: input.contentHash,
+          artifactType: CHAPTER_ARTIFACT_BOUNDARY_TYPE,
+          syncMode: input.artifactSyncMode,
+          status: "succeeded",
+          sourceType: "chapter_background_sync",
+          sourceStage: "chapter_execution",
+          metadataJson: JSON.stringify({
+            outcome: input.result.status,
+            completedArtifacts: input.result.completedArtifacts,
+            reason: input.result.reason ?? null,
+          }),
+        },
+        update: {
+          status: "succeeded",
+          sourceType: "chapter_background_sync",
+          sourceStage: "chapter_execution",
+          metadataJson: JSON.stringify({
+            outcome: input.result.status,
+            completedArtifacts: input.result.completedArtifacts,
+            reason: input.result.reason ?? null,
+          }),
+          updatedAt: new Date(),
+        },
+      });
+    };
+    if (input.revisionGuard) await prisma.$transaction(tx => persist(tx));
+    else await persist(prisma);
+  }
+
   private async claimCheckpoint(input: {
     novelId: string;
     chapterId: string;
     contentHash: string;
     artifactType: string;
-    syncMode: ArtifactSyncMode;
+    syncMode: string;
     sourceType?: string | null;
     sourceStage?: string | null;
     metadata?: Record<string, unknown>;
@@ -396,7 +662,7 @@ export class ChapterArtifactBackgroundSyncService {
     chapterId: string;
     contentHash: string;
     artifactType: string;
-    syncMode: ArtifactSyncMode;
+    syncMode: string;
     sourceType?: string | null;
     sourceStage?: string | null;
     metadata?: Record<string, unknown>;
@@ -460,7 +726,7 @@ export class ChapterArtifactBackgroundSyncService {
     chapterId: string;
     contentHash: string;
     artifactType: string;
-    syncMode: ArtifactSyncMode;
+    syncMode: string;
     sourceType?: string | null;
     sourceStage?: string | null;
     metadata?: Record<string, unknown>;

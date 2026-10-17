@@ -15,13 +15,14 @@ import {
 } from "@/mobile/autoDirector";
 
 interface NavbarProps {
+  onOpenProjectNav?: () => void;
   workspaceNavMode?: "workspace" | "project";
   onWorkspaceNavModeChange?: (mode: "workspace" | "project") => void;
 }
 
 export default function Navbar(props: NavbarProps) {
   const { workspaceNavMode, onWorkspaceNavModeChange } = props;
-  const { openQuickSetup } = useCreationSetup();
+  const { openModelSettings } = useCreationSetup();
   const location = useLocation();
   const isHome = location.pathname === "/";
   const showWorkspaceToggle = Boolean(workspaceNavMode && onWorkspaceNavModeChange);
@@ -38,10 +39,11 @@ export default function Navbar(props: NavbarProps) {
             <DesktopReleaseNotesDialog />
             <ProjectGithubLink />
           </div>
-          <span className="hidden truncate text-[11px] text-muted-foreground sm:block">AI Novel Production Engine</span>
+          <span className="hidden truncate text-[11px] text-muted-foreground sm:block">Biz Novel Studio</span>
         </div>
       </div>
       <div className="flex shrink-0 items-center gap-2 sm:gap-3">
+        {props.onOpenProjectNav ? <Button type="button" size="sm" variant="ghost" onClick={props.onOpenProjectNav}>全局菜单</Button> : null}
         {!isHome && showWorkspaceToggle ? (
           <Button
             type="button"
@@ -60,7 +62,7 @@ export default function Navbar(props: NavbarProps) {
           size="sm"
           variant="outline"
           className="gap-1.5"
-          onClick={openQuickSetup}
+          onClick={openModelSettings}
         >
           <SlidersHorizontal className="h-4 w-4" />
           <span className="hidden lg:inline">模型设置</span>
