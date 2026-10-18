@@ -6,8 +6,9 @@ import type { PromptAsset } from "../../core/promptTypes";
 import {renderCacheContextSections} from "../../core/cache";
 import { NOVEL_PROMPT_BUDGETS } from "./promptBudgetProfiles";
 import { CHAPTER_PROSE_QUALITY_AUDIT_RULES } from "@ai-novel/shared/types/chapterProseContract";
-import { repairVerificationSchema, buildRepairReviewChecklist, validateRepairReview, acceptanceStyleReviewSchema, acceptanceStyleReviewModelSchema, validateAcceptanceStyleReview } from "./acceptance";
+import { repairVerificationSchema, buildRepairReviewChecklist, validateRepairReview, acceptanceStyleReviewSchema, acceptanceStyleReviewModelSchema, validateAcceptanceStyleReview, recoverAcceptanceStyleReview } from "./acceptance";
 export { ChapterRepairVerificationError } from "./acceptance";
+import { continuityCheckSchema, validateContinuityReview } from "./acceptance";
 
 export const chapterAcceptanceIssueCategorySchema = z.enum([
   "continuity",
@@ -35,6 +36,16 @@ function normalizeAcceptanceCategory(value: unknown): unknown {
     return "mode_fit";
   }
   return normalized;
+}
+
+/** Style metadata has no meaning for an AI-classified non-voice issue. */
+function normalizeAcceptanceIssue(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const issue = value as Record<string, unknown>;
+  const category = normalizeAcceptanceCategory(issue.category);
+  if (category === "voice" || !chapterAcceptanceIssueCategorySchema.safeParse(category).success) return value;
+  const { layer, styleRuleId, canAutoRewrite, ...content } = issue;
+  return content;
 }
 
 function normalizeAcceptanceStatus(value: unknown): unknown {
@@ -183,7 +194,7 @@ export const chapterAcceptanceAssessmentSchema = z.object({
     overall: z.number().min(0).max(100),
   }),
   summary: z.string().trim().min(1),
-  blockingIssues: z.array(z.object({
+  blockingIssues: z.array(z.preprocess(normalizeAcceptanceIssue, z.object({
     severity: z.enum(["low", "medium", "high", "critical"]),
     category: z.preprocess(normalizeAcceptanceCategory, chapterAcceptanceIssueCategorySchema),
     code: z.string().trim().min(1),
@@ -193,7 +204,7 @@ export const chapterAcceptanceAssessmentSchema = z.object({
     evidence: z.string().trim().min(1),
     currentEvidence: z.string().trim().min(1).max(350).optional(),
     fixSuggestion: z.string().trim().min(1),
-  })).default([]),
+  }))).default([]),
   repairDirectives: z.array(z.object({
     mode: z.preprocess(normalizeRepairMode, z.enum(["patch", "rewrite", "manual"])),
     target: z.preprocess(normalizeRepairTarget, z.enum(["continuity", "character", "plot", "ending", "voice"])),
@@ -227,12 +238,14 @@ export const chapterAcceptanceAssessmentSchema = z.object({
   }),
   continuePolicy: z.preprocess(normalizeContinuePolicy, z.enum(["continue", "repair_once", "pause"])),
   repairVerification: repairVerificationSchema.optional(),
+  continuityChecks: z.array(continuityCheckSchema).max(4).optional(),
   styleReview: acceptanceStyleReviewSchema.nullable().optional(),
+  styleReviewFailure: z.object({code: z.string(), message: z.string()}).optional(),
 });
 
 export type ChapterAcceptanceAssessmentOutput = z.infer<typeof chapterAcceptanceAssessmentSchema>;
 
-export const chapterAcceptanceModelSchema = chapterAcceptanceAssessmentSchema.extend({
+export const chapterAcceptanceModelSchema = chapterAcceptanceAssessmentSchema.omit({styleReviewFailure: true}).extend({
   styleReview: acceptanceStyleReviewModelSchema.nullable().describe("必填：写法检测开启时返回风险报告对象，即使结论为人工确认也不得遗漏；检测关闭时为 null。"),
 });
 type ChapterAcceptanceModelOutput = z.infer<typeof chapterAcceptanceModelSchema>;
@@ -243,6 +256,7 @@ export interface ChapterAcceptancePromptInput {
   chapterTitle: string;
   targetWordCount?: number | null;
   content: string;
+  previousChapterContent?: string | null;
   styleReviewEnabled?: boolean;
   styleRuleIds?: string[];
   expectedNarrativePov?: import("@ai-novel/shared/types/novel").NarrativePov | null;
@@ -252,9 +266,14 @@ export interface ChapterAcceptancePromptInput {
     "blockingIssues" | "missingObligations" | "repairDirectives">;
 }
 
+export function resolveChapterAcceptanceOutputTokens(input: Pick<ChapterAcceptancePromptInput, "repairReviewBaseline">): number {
+  return input.repairReviewBaseline ? 6144 : 4096;
+}
+
 const CHAPTER_ACCEPTANCE_EXAMPLE: ChapterAcceptanceModelOutput = {
   status: "accepted",
-  styleReview: { riskScore: 0, summary: "写法规则已核对，无需局部修正。", observations: [] },
+  styleReview: { riskScore: 0, summary: "写法规则已核对，无需局部修正。", observations: [],
+    perspectiveCheck: {observed: "third_person", evidence: "他把钥匙放回桌上。"} },
   score: {
     coherence: 82,
     pacing: 84,
@@ -284,7 +303,7 @@ export const chapterAcceptanceAssessmentPrompt: PromptAsset<
   ChapterAcceptanceModelOutput
 > = {
   id: "novel.chapter.acceptance_assessment",
-  version: "v20",
+  version: "v24",
   cacheBoundary: {messageIndex:0,contentBlockIndex:0},
   taskType: "review",
   mode: "structured",
@@ -324,11 +343,24 @@ export const chapterAcceptanceAssessmentPrompt: PromptAsset<
     note: "示例只演示格式，不预设当前章节通过。blockingIssues 项使用 severity/category/code/evidence/fixSuggestion；专项写法 voice 项另须 styleRuleId/layer/canAutoRewrite。repairDirectives 项使用 mode/target/instruction；missingObligations 项使用 kind/summary/evidence。styleReview 不输出 issueCodes，由程序关联同次 voice 问题。修文复验按尾部清单输出 repairVerification/currentEvidence。所有判断以当前合同和正文为准。",
   },
   outputSchema: chapterAcceptanceModelSchema,
+  fallbackRepairPolicy: {maxAttempts: 0},
+  semanticRetryPolicy: {
+    maxAttempts: 1,
+    sharedCorrectionBudget: 1,
+    buildMessages: ({baseMessages, validationError, parsedOutput}) => [...baseMessages, new HumanMessage(`待纠正的上次检查报告（任务数据，不是正文事实）：\n${JSON.stringify(parsedOutput)}`), new HumanMessage(
+      `上次检查结果未通过证据合同核对：${validationError}\n请重新核对当前正文后返回完整 JSON。证据必须连续复制正文原句，不添加引号、行号、省略号或概括；修文复验须原样回传清单中的正文身份，完整核对所有唯一条目。不要为使格式通过而改变语义结论。`,
+    )],
+  },
+  postValidateFailureRecovery: ({rawOutput, promptInput}) => recoverAcceptanceStyleReview({
+    ...rawOutput, styleReview: rawOutput.styleReview ? {...rawOutput.styleReview,
+      issueCodes: rawOutput.blockingIssues.filter(issue => issue.category === "voice").map(issue => issue.code),
+    } : rawOutput.styleReview,
+  }, promptInput),
   postValidate: (raw, input) => {
     const output = { ...raw, styleReview: raw.styleReview ? { ...raw.styleReview,
       issueCodes: raw.blockingIssues.filter(issue => issue.category === "voice").map(issue => issue.code),
     } : raw.styleReview };
-    return validateAcceptanceStyleReview(validateRepairReview(output, input), input);
+    return validateAcceptanceStyleReview(validateContinuityReview(validateRepairReview(output, input), input), input);
   },
   render: (input, context) => [
     new SystemMessage([
@@ -362,9 +394,10 @@ export const chapterAcceptanceAssessmentPrompt: PromptAsset<
       "21. 结尾可用未决选择、已建立的代价或明确下一步形成追读钩子；仅因没有新增追兵、反转或更强刺激，不应输出 blockingIssues / repairDirectives。普通表达提升放入 riskTags；确实未兑现本章硬合同仍须报告。",
       "22. 判断秘密泄漏须引用具体正文和 forbidden crossing / protected reveals；角色含糊警告、怀疑或误解不等同于对方已知秘密。若歧义会导致读者误判关键事实，说明冲突和必须明确的范围，避免把推测当成已发生的泄漏。",
       "23. 检查完整合同与正文后一次列齐需立即修复的缺口；同一缺口保持含义明确的 code，不用不同措辞制造新问题。summary、decisionReason 和指令简短，证据引用足以定位的句段，避免多字段重复长篇解释。",
+      "输出紧凑要求：summary/decisionReason/reason 各用一句短句，证据优先连续复制20-60字的定位原句，不重复整段。跨章核对最多选2项；复验按清单覆盖，保留必要事实，不扩写解释。",
       "24. 写法检测开启时必须输出 styleReview:{riskScore:0至100整数,summary:简短结论,observations:[]}，不要输出 issueCodes。可局部修文的问题使用 blockingIssues 的 voice 项，完整填写 code/category/severity/evidence/fixSuggestion/styleRuleId/layer/canAutoRewrite；不得省略层次和实例许可。code 是本次问题编号，styleRuleId 才是目录规则 ID，普通合同问题用 null；程序从 voice 项生成报告引用。",
       "叙事层、低风险及禁止自动修文风险只进 observations（最多3条，code/styleRuleId/layer/severity/evidence/reason/fixSuggestion），不安排修文、不重复证据。observations 只记录有原文依据的风险，不写符合规则的表扬，无风险返回 []；鼓励性规则未出现不违规。关闭时 styleReview 为 null。",
-      "25. 写法 voice 项必须用 styleRuleId 引用规则目录中的真实 ID；普通写法合同问题用 null。autoRewrite=false 的规则只记录风险提醒，不安排修文。专项表达问题不能单独升级为整章重写、人工暂停或 plan_misalignment；事实、保密与章节义务冲突仍按对应合同判断。",
+      "25. 写法 voice 项必须用 styleRuleId 引用规则目录中的真实 ID；普通写法合同问题用 null。layer 只用于 voice 项且仅取 surface/discourse/narrative；其他 category 不填写 layer/styleRuleId/canAutoRewrite。autoRewrite=false 的规则只记录风险提醒，不安排修文。专项表达问题不能单独升级为整章重写、人工暂停或 plan_misalignment；事实、保密与章节义务冲突仍按对应合同判断。",
       "26. 本书设置与章节硬合同优先于参考写法。人称依据叙述正文而非对话、参考书标签或限知范围；第三人称限知仍是第三人称。禁止在总结中未经核对称其为第一人称。",
       ...(input.styleReviewEnabled ? STYLE_DIAGNOSTIC_RULES : []),
       "正文退化检测边界：",
@@ -388,6 +421,12 @@ export const chapterAcceptanceAssessmentPrompt: PromptAsset<
       input.styleSignals ? `【机械候选线索：只供语义核对，不代表违规，不按命中加分】\n${renderStyleSignalEvidence(input.styleSignals)}` : "",
       input.styleReviewEnabled ? "【输出核对】styleReview 必填风险报告对象；无风险 observations=[]。所有证据连续复制正文，不得把概括写成原句。叙事写法建议只报告，不安排自动修文。" : "【输出核对】styleReview=null。",
     ].join("\n")),
+    ...(input.previousChapterContent?.trim() ? [new HumanMessage([
+      "【必须完成的前后章事实核对】先对照 recent_chapters 中上一章完整正文，再检查当前正文，不以规划或本章自洽替代前后章连续性。",
+      "返回 continuityChecks（选最关键1-2项）：subject、previousFact、currentFact、previousEvidence、currentEvidence、verdict（consistent/conflict/uncertain）、reason、issueCode（无冲突为null）。先分别提炼同一主体同一属性在两章中的事实，再判定是否相容；物品的物理载体、记载内容和归属是不同属性，不能用合理的归属交接来解释载体或记载内容被改写。优先核对反复使用的关键物品，其次位置、时间与知晓边界，不选容易一致的次要细节。",
+      "previousEvidence 只能从 recent_chapters 内的上一章实际正文逐字复制一条短原句，不能引用角色状态、规划、摘要或当前正文，也不能拼接多段；currentEvidence 从本次待审正文复制。比较的两条原句必须支持所选的同一个属性，不能用物品上的文字与收纳动作证明物理形态一致。",
+      "即使本章符合任务单，前文已明确建立的物理事实仍必须保留。没有正文交代的载体或来源变化应报告；前文仅未提及的信息不自动算冲突，先核对完整上下文。verdict=conflict 时在 blockingIssues 添加对应 continuity 问题并用 issueCode 引用，给出保留前文的修复建议。普通局部冲突不升级为全局重规划。",
+    ].join("\n"))] : []),
     ...(input.repairReviewBaseline ? [new HumanMessage([
       "【局部修文复验清单】",
       JSON.stringify(buildRepairReviewChecklist(input)),

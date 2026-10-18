@@ -8,6 +8,7 @@ const {
 test("chapter preparation finishes planning writes before it reports ready", async () => {
   const calls = [];
   const service = new ChapterExecutionPreparationService({
+    ensureTimelineReady: async () => { calls.push(["timeline"]); },
     chapterPlanJITService: {
       ensureExecutionReady: async (_novelId, _chapterId, options) => {
         calls.push(["execution_contract", options]);
@@ -33,8 +34,8 @@ test("chapter preparation finishes planning writes before it reports ready", asy
     },
   });
 
-  assert.deepEqual(calls.map(([name]) => name), ["execution_contract", "chapter_plan"]);
-  assert.equal(calls[0][1].completionProfile.targetChapterCount, 48);
+  assert.deepEqual(calls.map(([name]) => name), ["timeline", "execution_contract", "chapter_plan"]);
+  assert.equal(calls[1][1].completionProfile.targetChapterCount, 48);
   assert.deepEqual(result, {
     status: "ready",
     mode: "full_book_autopilot",
@@ -46,6 +47,7 @@ test("chapter preparation finishes planning writes before it reports ready", asy
 test("manual chapter preparation does not create an autopilot route window", async () => {
   let jitCalls = 0;
   const service = new ChapterExecutionPreparationService({
+    ensureTimelineReady: async () => {},
     chapterPlanJITService: {
       ensureExecutionReady: async () => {
         jitCalls += 1;
@@ -62,4 +64,16 @@ test("manual chapter preparation does not create an autopilot route window", asy
   assert.equal(jitCalls, 0);
   assert.equal(result.mode, "manual");
   assert.deepEqual(result.preparedArtifacts, ["chapter_plan"]);
+});
+
+test('selected director ranges reconcile their chapter contracts without extending the route window', async () => {
+  const calls = [];
+  const service = new ChapterExecutionPreparationService({ ensureTimelineReady: async () => {},
+    chapterPlanJITService: { ensureExecutionReady: async (_n, _c, options) => calls.push(options) },
+    planner: { ensureChapterPlan: async () => ({ id: 'selected-plan' }) }, loadEstimatedChapterCount: async () => 80 });
+  const result = await service.prepare('n', 'c', { controlPolicy: { kickoffMode: 'director_start',
+    advanceMode: 'auto_to_execution', reviewCheckpoints: [], autoExecutionRange: { mode: 'chapter_range', start: 4, end: 12 } } });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].prepareRouteWindow, false);
+  assert.equal(result.mode, 'director_execution');
 });

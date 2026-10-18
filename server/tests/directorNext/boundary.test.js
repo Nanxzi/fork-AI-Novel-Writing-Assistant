@@ -52,6 +52,16 @@ test("the director module only imports files inside itself", () => {
     "zod",
     "@ai-novel/shared/types/director/characterCandidates",
   ]);
+  // The revision DTO is an explicit transport/application contract, never a domain dependency.
+  const revisionContractConsumers = new Set([
+    "application/commandService.ts", "application/ports.ts", "http/routes.ts",
+    "infrastructure/commands/gateResolution.ts",
+  ]);
+  // Shared budget DTOs carry saved facts, not runtime or policy dependencies.
+  const chapterBudgetContractConsumers = new Set([
+    "application/commandService.ts", "application/ports.ts", "http/routes.ts",
+    "infrastructure/commands/resumeRun.ts", "domain/projection.ts",
+  ]);
   for (const file of listTsFiles(moduleRoot)) {
     const source = fs.readFileSync(file, "utf8");
     const isInfrastructure = file === infrastructureRoot || file.startsWith(`${infrastructureRoot}${path.sep}`);
@@ -63,7 +73,14 @@ test("the director module only imports files inside itself", () => {
       if (!specifier.startsWith(".")) {
         const allowedRuntimeImport = isRuntime && (specifier === "node:crypto" || specifier === "node:os");
         const allowedHttpImport = isHttp && allowedHttpImports.has(specifier);
-        if ((!isInfrastructure || !allowedInfrastructureImports.has(specifier)) && !allowedRuntimeImport && !allowedHttpImport) {
+        const allowedRevisionContract = specifier === "@ai-novel/shared/types/director/revision"
+          && revisionContractConsumers.has(relative.replace(/\\/g, "/"));
+        const allowedChapterBudgetContract = specifier === "@ai-novel/shared/types/director/chapterBudget"
+          && chapterBudgetContractConsumers.has(relative.replace(/\\/g, "/"));
+        if (allowedChapterBudgetContract && relative.replace(/\\/g, "/") === "domain/projection.ts") {
+          assert.match(source, /import\s+type\s*\{\s*DirectorChapterBudgetView\s*\}\s*from\s*["']@ai-novel\/shared\/types\/director\/chapterBudget["']/);
+        }
+        if ((!isInfrastructure || !allowedInfrastructureImports.has(specifier)) && !allowedRuntimeImport && !allowedHttpImport && !allowedRevisionContract && !allowedChapterBudgetContract) {
           violations.push(`${relative} imports package or alias "${specifier}"`);
         }
         continue;

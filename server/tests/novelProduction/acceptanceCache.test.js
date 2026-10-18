@@ -5,7 +5,7 @@ const { loadRuntimeSource } = require("./sourceHarness.cjs");
 
 function fixture() {
   const rows = new Map();
-  const state = { revision: "v1", calls: 0, fail: false, identityFails: false, unavailable: false, mutateDuringRun: false };
+  const state = { revision: "v1", calls: 0, fail: false, identityFails: false, unavailable: false, styleUnavailable: false, mutateDuringRun: false };
   const { ChapterQualityGateService } = loadRuntimeSource("ChapterQualityGateService.ts", {
     "../../../db/prisma": { prisma: { chapterArtifactSyncCheckpoint: {
       findUnique: async ({ where }) => rows.get(JSON.stringify(where)) ?? null,
@@ -21,7 +21,7 @@ function fixture() {
       state.calls++;
       if (state.fail) throw Error("request failed");
       if (state.mutateDuringRun) state.revision = "v2";
-      return { assessment: { riskTags: state.unavailable ? ["acceptance_gate_unavailable"] : [], blockingIssues: [] } };
+      return { assessment: { riskTags: state.unavailable ? ["acceptance_gate_unavailable"] : state.styleUnavailable ? ['style_review_unavailable'] : [], blockingIssues: [] } };
     },
   } });
   return { state, rows, create, input: { novelId: "n", chapterId: "c", content: "draft", request: {}, contextPackage: { chapter: { title: "Chapter", order: 1 } } } };
@@ -32,6 +32,15 @@ test("cache coalesces concurrent misses before persistent lookup resolves", asyn
   await Promise.all([gate.runAcceptanceGate(h.input), gate.runAcceptanceGate(h.input)]);
   assert.equal(h.state.calls, 1);
   assert.equal(h.rows.size, 1);
+});
+
+test('partial style failure cannot freeze a missing check in memory or persistent cache', async () => {
+  const h = fixture(); const gate = h.create(); h.state.styleUnavailable = true;
+  await gate.runAcceptanceGate(h.input); await gate.runAcceptanceGate(h.input);
+  assert.equal(h.state.calls, 2); assert.equal(h.rows.size, 0);
+  h.state.styleUnavailable = false;
+  await gate.runAcceptanceGate(h.input); await gate.runAcceptanceGate(h.input);
+  assert.equal(h.state.calls, 3); assert.equal(h.rows.size, 1);
 });
 
 test("rejected request clears in-flight slot and can be retried", async () => {
@@ -105,7 +114,8 @@ test("cache identity renders effective context, overrides and model without vola
     "../../../../prompting/core/promptRunner": { preparePromptExecution: ({ promptInput, contextBlocks }) => ({ context: {}, messages: [{ getType: () => "human", content: JSON.stringify({ promptInput, contextBlocks }) }] }) },
     "../../../../prompting/context/promptContextResolution": { resolvePromptContextBlocksForAsset: async () => ({ blocks: [state.context] }) },
     "../../../../prompting/prompts/novel/chapterLayeredContext": { buildChapterReviewContextBlocks: () => [] },
-    "../../../../prompting/prompts/novel/chapterAcceptance.prompts": { chapterAcceptanceAssessmentPrompt: asset },
+    "../../../../prompting/prompts/novel/chapterAcceptance.prompts": { chapterAcceptanceAssessmentPrompt: asset,
+      resolveChapterAcceptanceOutputTokens: require('../../dist/prompting/prompts/novel/chapterAcceptance.prompts').resolveChapterAcceptanceOutputTokens },
     "../../../../prompting/slots/PromptSlotOverrideService": { promptSlotOverrideService: { resolveForRuntime: async () => ({ appendBlocks: [state.slot] }) } },
     "../../../../prompting/templates/templateRuntime": { resolveAdvancedPromptMessages: async ({ officialMessages }) => [...officialMessages, { getType: () => "system", content: state.template }] },
   });

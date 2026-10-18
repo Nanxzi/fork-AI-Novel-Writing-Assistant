@@ -3,15 +3,17 @@ import { buildChapterArtifactContentHash } from "../runtime/artifactSync/Chapter
 import { AsyncLocalStorage } from "node:async_hooks";
 import {
   DIRECTOR_ISSUE_GOVERNANCE_VERSION,
+  resolveChapterReviewRetryPolicy,
   type DirectorIssueAction,
   type DirectorIssueCode,
 } from "@ai-novel/shared/types/directorIssue";
 import { prisma } from "../../../db/prisma";
-import { novelEventBus } from "../../../events";
+import { novelEventBus } from "../../../events/publisher";
 import { runWithLlmUsageTracking } from "../../../llm/usageTracking";
 import { buildDirectorCompletionProfile } from "@ai-novel/shared/types/directorCompletion";
 import { ChapterRouteWindowService } from "../planning/ChapterRouteWindowService";
 import { ChapterRuntimeCoordinator } from "../runtime/ChapterRuntimeCoordinator";
+import { createPersistedChapterReviewRetryBudget, withChapterReviewRetryBudget, ReviewRetryPersistenceError } from "../runtime/acceptance";
 import { CHAPTER_ARTIFACT_BOUNDARY_TYPE, ChapterArtifactSyncBoundaryError } from "../runtime/artifactSync";
 import { isChapterEmptyContentError } from "../runtime/chapterEmptyContentError";
 import { ChapterContentPersistenceError } from "../runtime/lifecycle";
@@ -31,10 +33,13 @@ import { isCurrentChapterProductionCompleted, isCurrentV2ChapterProductionComple
 import {
   beginChapterUsage,
   DIRECTOR_CHAPTER_PREFLIGHT_RESERVE_TOKENS,
-  DIRECTOR_CHAPTER_TOKEN_LIMIT,
+  readChapterUsageCounters,
+  pauseChapterBudget,
+  chapterBudgetView,
   observeChapterUsage,
   finalizeChapterUsage,
 } from "./usage";
+import type {DirectorChapterBudgetStage} from "@ai-novel/shared/types/director/chapterBudget";
 import {
   loadDirectorIssueTaskContext,
 } from "../director/issues";
@@ -98,26 +103,6 @@ export class NovelPipelineExecutor {
     private readonly automaticAttempts = new ChapterAutomaticAttemptService(),
     private readonly assertOwner = assertDirectorPipelineOwner,
   ) {}
-
-  private async readChapterBatchTokens(jobId: string): Promise<number | undefined> {
-    try {
-      const result = await prisma.llmInvocationUsageRecord.aggregate({
-        where: {
-          generationJobId: jobId,
-          stage: "chapter_batch",
-          totalTokens: { not: null },
-        },
-        _sum: { totalTokens: true },
-      });
-      return result._sum.totalTokens ?? 0;
-    } catch (error) {
-      logPipelineWarn("章节规划用量读取失败，沿用作业总量预算", {
-        jobId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      return undefined;
-    }
-  }
 
   private async ensurePipelineNotCancelled(jobId: string): Promise<void> {
     const executionOwner = this.executionOwnerStore.getStore();
@@ -490,6 +475,7 @@ export class NovelPipelineExecutor {
         const chaptersToProcess = chapters.slice(remainingStartIndex);
         const closedOrders = new Set(chapterCandidates.filter(chapter => runtimePayload.directorNext ? isCurrentV2ChapterProductionCompleted(chapter) : isCurrentChapterProductionCompleted(chapter)).map(chapter => chapter.order));
         let pendingManualRecovery = false;
+        let pendingManualRecoveryReason = "章节需要人工确认，后续生成已暂停。";
 
         if (runtimePayload.directorNext) {
           await this.updateJobRequired(jobId, {
@@ -506,7 +492,7 @@ export class NovelPipelineExecutor {
               min: 3, target: 5,
               provider: runtimePayload.provider, model: runtimePayload.model, temperature: runtimePayload.temperature,
               taskId: runtimePayload.workflowTaskId ?? jobId,
-              completionProfile: buildDirectorCompletionProfile(autopilotTargetEndOrder),
+              completionProfile: buildDirectorCompletionProfile(novel.estimatedChapterCount ?? autopilotTargetEndOrder),
             });
           } catch (error) {
             throw new PipelineIssueFailure(`滚动规划未能准备第 ${order} 章，已保存正文会保留，请检查后继续。`,
@@ -563,24 +549,24 @@ export class NovelPipelineExecutor {
             }
           }
 
-          const checkChapterBudget = async (closed = false, reserveTokens = 0) => {
+          const checkChapterBudget = async (closed = false, reserveTokens = 0, stage: DirectorChapterBudgetStage | null = null) => {
             if (!runtimePayload.directorNext) return;
-            const usage = await prisma.generationJob.findUniqueOrThrow({
-              where: { id: jobId }, select: { totalTokens: true },
-            });
-            const chapterBatchTokens = await this.readChapterBatchTokens(jobId);
+            const usage = await readChapterUsageCounters(jobId);
             let initialized: boolean;
             let observed: ReturnType<typeof observeChapterUsage>;
             try {
-              initialized = beginChapterUsage(runtimePayload.directorNext, chapter.id, chapter.order, usage.totalTokens, chapterBatchTokens);
+              initialized = beginChapterUsage(runtimePayload.directorNext, chapter.id, chapter.order, usage.job, usage.batch);
               observed = closed
-                ? finalizeChapterUsage(runtimePayload.directorNext, chapter.id, usage.totalTokens, chapterBatchTokens)
-                : observeChapterUsage(runtimePayload.directorNext, chapter.id, usage.totalTokens, chapterBatchTokens);
+                ? finalizeChapterUsage(runtimePayload.directorNext, chapter.id, usage.job, usage.batch)
+                : observeChapterUsage(runtimePayload.directorNext, chapter.id, usage.job, usage.batch);
             } catch (error) {
               throw new PipelineIssueFailure(error instanceof Error ? error.message : "章节用量记录异常，不能继续生成。",
                 "runtime.data_integrity", "chapter_usage", chapter.id, chapter.order);
             }
-            if (initialized || closed) {
+            const row = runtimePayload.directorNext.chapterUsage!.find(item => item.chapterId === chapter.id)!;
+            const normalizedReserve = Math.max(0, Math.floor(reserveTokens));
+            const paused = pauseChapterBudget(row, normalizedReserve, stage);
+            if (initialized || closed || paused) {
               try {
                 await this.updateJobRequired(jobId, {
                   ...(closed ? { completedCount: completed + 1, progress: Number(((completed + 1) / totalCount).toFixed(4)) } : {}),
@@ -592,13 +578,12 @@ export class NovelPipelineExecutor {
                   "runtime.persistence_failed", "chapter_usage", chapter.id, chapter.order);
               }
             }
-            const normalizedReserve = Math.max(0, Math.floor(reserveTokens));
-            const preflightExceeded = normalizedReserve > 0
-              && observed.totalTokens + normalizedReserve >= DIRECTOR_CHAPTER_TOKEN_LIMIT;
-            if (observed.exceeded || preflightExceeded) {
+            if (paused) {
+              const budget = chapterBudgetView(jobId, row);
+              const unit = budget.metric === "uncached_tokens_v1" ? "有效 Tokens" : "Tokens";
               const message = observed.exceeded
-                ? `第${chapter.order}章累计 AI 用量达到 ${observed.totalTokens} Tokens，${closed ? "正文已保存，" : ""}请检查后再继续。`
-                : `第${chapter.order}章当前已用 ${observed.totalTokens} Tokens，下一步预留 ${normalizedReserve} Tokens 后将接近本章上限，${closed ? "正文已保存，" : ""}请检查后再继续。`;
+                ? `第${chapter.order}章累计 AI 用量达到 ${budget.usedTokens} ${unit}，本章上限 ${budget.tokenLimit}，${closed ? "正文已保存，" : ""}请从导演台调整本章额度后继续。`
+                : `第${chapter.order}章当前已用 ${budget.usedTokens} ${unit}，下一步预留 ${normalizedReserve} Tokens 后将接近本章上限 ${budget.tokenLimit}，${closed ? "正文已保存，" : ""}请从导演台调整本章额度后继续。`;
               throw new PipelineIssueFailure(message,
                 "runtime.token_budget_exceeded", "chapter_usage", chapter.id, chapter.order);
             }
@@ -668,11 +653,14 @@ export class NovelPipelineExecutor {
           };
           try {
             previouslyConsumed = chapterRetryCountUsed = await this.automaticAttempts.used(jobId, chapter.id);
+            const reviewRetryBudget = createPersistedChapterReviewRetryBudget({ novelId, chapterId: chapter.id,
+              executionId: jobId, policy: resolveChapterReviewRetryPolicy(issueGovernance?.policy),
+              beforeRequest: async () => { await checkCancelled(); await checkChapterBudget(false, DIRECTOR_CHAPTER_PREFLIGHT_RESERVE_TOKENS, "review"); } });
             while (!chapterResult) {
               try {
                 await checkCancelled();
                 await checkChapterBudget();
-                chapterResult = await this.chapterRuntimeCoordinator.runPipelineChapter(
+                chapterResult = await withChapterReviewRetryBudget(reviewRetryBudget, () => this.chapterRuntimeCoordinator.runPipelineChapter(
                   novelId,
                   chapter.id,
                   {
@@ -693,7 +681,7 @@ export class NovelPipelineExecutor {
                   },
                   {
                   onCheckCancelled: checkCancelled,
-                  onCheckBudget: (reserveTokens = DIRECTOR_CHAPTER_PREFLIGHT_RESERVE_TOKENS) => checkChapterBudget(false, reserveTokens),
+                  onCheckBudget: (reserveTokens = DIRECTOR_CHAPTER_PREFLIGHT_RESERVE_TOKENS, stage) => checkChapterBudget(false, reserveTokens, stage),
                   onStageChange: async (stage) => {
                     await applyChapterStage(stage);
                   },
@@ -726,9 +714,12 @@ export class NovelPipelineExecutor {
                     logPipelineError("章节生成连续未返回正文，准备自动重试当前章", meta);
                   },
                   },
-                );
+                ));
                 break;
               } catch (error) {
+                if (error instanceof ReviewRetryPersistenceError) {
+                  throw new PipelineIssueFailure(error.message, "runtime.data_integrity", "chapter_review", chapter.id, chapter.order);
+                }
                 if (runtimePayload.directorNext && error instanceof ChapterArtifactSyncBoundaryError && error.result.characterReviewId) {
                   await checkCancelled();
                   runtimePayload.directorNext.pendingCharacterReviewId = error.result.characterReviewId;
@@ -909,6 +900,7 @@ export class NovelPipelineExecutor {
           }
           if (shouldStopAfterCurrentChapter) {
             pendingManualRecovery = true;
+            if (chapterResult.reviewRetries?.exhausted) pendingManualRecoveryReason = `第${chapter.order}章检查重试已用 ${chapterResult.reviewRetries.used}/${chapterResult.reviewRetries.maxRetries} 次，正文已保留，请从小说工作台确认后继续。`;
             logPipelineWarn("章节需要人工处理，已暂停后续章节流水线", {
               jobId,
               order: chapter.order,
@@ -922,7 +914,7 @@ export class NovelPipelineExecutor {
           await this.updateJobSafe(jobId, {
             status: "queued",
             pendingManualRecovery: true,
-            error: "章节需要人工确认，后续生成已暂停。",
+            error: pendingManualRecoveryReason,
             heartbeatAt: null,
             currentStage: "queued",
             currentItemKey: null,

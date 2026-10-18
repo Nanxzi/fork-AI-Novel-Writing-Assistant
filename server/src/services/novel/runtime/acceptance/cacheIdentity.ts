@@ -3,7 +3,7 @@ import { resolveLLMClientOptions } from "../../../../llm/factory";
 import { preparePromptExecution } from "../../../../prompting/core/promptRunner";
 import { resolvePromptContextBlocksForAsset } from "../../../../prompting/context/promptContextResolution";
 import { buildChapterReviewContextBlocks } from "../../../../prompting/prompts/novel/chapterLayeredContext";
-import { chapterAcceptanceAssessmentPrompt } from "../../../../prompting/prompts/novel/chapterAcceptance.prompts";
+import { chapterAcceptanceAssessmentPrompt, resolveChapterAcceptanceOutputTokens } from "../../../../prompting/prompts/novel/chapterAcceptance.prompts";
 import { promptSlotOverrideService } from "../../../../prompting/slots/PromptSlotOverrideService";
 import { resolveAdvancedPromptMessages } from "../../../../prompting/templates/templateRuntime";
 import type { ChapterAcceptanceAssessmentInput } from "../ChapterAcceptanceAssessmentService";
@@ -36,6 +36,7 @@ export async function buildAcceptanceCacheIdentity(input: ChapterAcceptanceAsses
   const promptInput = {
     novelTitle: input.novelTitle, chapterTitle: input.chapterTitle, chapterOrder: input.chapterOrder,
     targetWordCount: input.targetWordCount ?? null, content: input.content,
+    previousChapterContent: input.contextPackage.previousChapterContent,
     repairReviewBaseline: input.repairReviewBaseline,
     styleRewriteBaseline: input.styleRewriteBaseline,
     styleReviewEnabled: isAcceptanceStyleReviewEnabled(input.contextPackage),
@@ -52,7 +53,7 @@ export async function buildAcceptanceCacheIdentity(input: ChapterAcceptanceAsses
   });
   const resolved = await resolveLLMClientOptions(input.provider, {
     model: input.model, temperature: Math.min(input.temperature ?? 0.2, 0.35),
-    maxTokens: 3200, taskType: asset.taskType, executionMode: "structured",
+    maxTokens: resolveChapterAcceptanceOutputTokens(input), taskType: asset.taskType, executionMode: "structured",
   });
   const identity = {
     version: 2, promptId: asset.id, promptVersion: asset.version,

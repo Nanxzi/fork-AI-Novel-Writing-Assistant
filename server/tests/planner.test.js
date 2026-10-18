@@ -4,6 +4,23 @@ const { compileIntentToPlan } = require("../dist/agents/planner/compiler.js");
 const { normalizeIntentPayload } = require("../dist/agents/planner/utils.js");
 const { summarizeIntentValidationFailure } = require("../dist/agents/planner/parser.js");
 
+test("planner invocations retain novel and chapter attribution without assigning a chapter to book planning", async (t) => {
+  const runner = require("../dist/prompting/core/promptRunner.js");
+  const { invokePlannerLLM } = require("../dist/services/planner/plannerLlm.js");
+  const original = runner.runStructuredPrompt;
+  const calls = [];
+  runner.runStructuredPrompt = async (request) => { calls.push(request); return { output: { title: "规划", objective: "推进线索" } }; };
+  t.after(() => { runner.runStructuredPrompt = original; });
+  await invokePlannerLLM({ novelId: "book", chapterId: "chapter-2", options: { provider: "deepseek", model: "offline" },
+    scopeLabel: "第二章", planLevel: "chapter", contextBlocks: [] });
+  await invokePlannerLLM({ novelId: "book", options: {}, scopeLabel: "全书", planLevel: "book", contextBlocks: [] });
+  assert.equal(calls[0].options.chapterId, "chapter-2");
+  assert.equal(calls[0].options.novelId, "book");
+  assert.equal(calls[0].options.model, "offline");
+  assert.equal(calls[1].options.novelId, "book");
+  assert.equal(calls[1].options.chapterId, undefined);
+});
+
 test("compileIntentToPlan uses chapter order tools for chapter content", () => {
   const plan = compileIntentToPlan({
     goal: "What happened in the first two chapters?",
@@ -632,7 +649,7 @@ test("normalizeIntentPayload maps current novel character count style AI intents
   assert.deepEqual(normalized.chapterSelectors, {});
 });
 
-test("normalizeIntentPayload maps generic current novel overview requests to production status query", () => {
+test("normalizeIntentPayload preserves AI clarification for current novel requests", () => {
   const normalized = normalizeIntentPayload({
     intent: "general_chat",
     confidence: 0.62,
@@ -648,12 +665,11 @@ test("normalizeIntentPayload maps generic current novel overview requests to pro
     novelId: "novel-1",
   });
 
-  assert.equal(normalized.intent, "query_novel_production_status");
-  assert.equal(normalized.requiresNovelContext, true);
-  assert.equal(normalized.interactionMode, "query");
-  assert.equal(normalized.assistantResponse, "execute");
-  assert.equal(normalized.shouldAskFollowup, false);
-  assert.deepEqual(normalized.missingInfo, []);
+  assert.equal(normalized.intent, "general_chat");
+  assert.equal(normalized.interactionMode, "review");
+  assert.equal(normalized.assistantResponse, "ask_followup");
+  assert.equal(normalized.shouldAskFollowup, true);
+  assert.deepEqual(normalized.missingInfo, ["specific aspect to view, such as progress, chapters, or production status"]);
 });
 
 test("summarizeIntentValidationFailure returns readable intent validation details", () => {

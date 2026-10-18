@@ -1,10 +1,12 @@
 import type { ChapterRuntimePackage, GenerationContextPackage } from "@ai-novel/shared/types/chapterRuntime";
 import type { ContentProvenance } from "@ai-novel/shared/types/canonicalState";
+import type {DirectorChapterBudgetStage} from "@ai-novel/shared/types/director/chapterBudget";
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
 import type { QualityScore, ReviewIssue } from "@ai-novel/shared/types/novel";
 import type { StyleRewriteBaseline, StyleRewriteGuard } from "@ai-novel/shared/types/styleEngine";
 import type { ChapterRuntimeRequestInput } from "./chapterRuntimeSchema";
 import type { ChapterAcceptanceAssessmentResult } from "./ChapterAcceptanceAssessmentService";
+import { currentChapterReviewRetryBudget, type ChapterReviewRetrySummary } from "./acceptance";
 import {
   ChapterArtifactSyncBoundaryError,
   type ChapterArtifactSyncResult,
@@ -33,7 +35,7 @@ export type { ChapterRepairSelectionRecord } from "./selection/ChapterRepairCand
 export interface PipelineRuntimeHooks {
   onCheckCancelled?: () => Promise<void>;
   /** Check the chapter budget before an internal AI step starts. */
-  onCheckBudget?: (reserveTokens?: number) => Promise<void>;
+  onCheckBudget?: (reserveTokens?: number, stage?: DirectorChapterBudgetStage) => Promise<void>;
   onStageChange?: (stage: "generating_chapters" | "reviewing" | "repairing") => Promise<void>;
   onEmptyContent?: (event: PipelineEmptyContentEvent) => Promise<void>;
   onRetryConsumed?: (kind: "quality_repair") => Promise<void | boolean>;
@@ -87,6 +89,7 @@ export interface QualityDebtAttribution {
 }
 
 export interface PipelineRuntimeResult {
+  reviewRetries?: ChapterReviewRetrySummary;
   reviewExecuted: boolean;
   pass: boolean;
   score: QualityScore;
@@ -188,7 +191,7 @@ const QUALITY_THRESHOLD = { coherence: 80, repetition: 75, engagement: 75 };
 // Pipeline execution owns the single automatic retry budget. Keeping the
 // writer attempt at zero avoids stacking a hidden empty-content retry on top.
 const EMPTY_CONTENT_GENERATION_RETRY_LIMIT = 0;
-const NON_PATCHABLE_REVIEW_ISSUE_CODES = new Set(["acceptance_gate_unavailable"]);
+const NON_PATCHABLE_REVIEW_ISSUE_CODES = new Set(["acceptance_gate_unavailable", "style_review_unavailable"]);
 
 const AUDIT_CATEGORY_MAP: Record<"continuity" | "character" | "plot" | "mode_fit", ReviewIssue["category"]> = {
   continuity: "coherence",
@@ -295,7 +298,7 @@ export async function runPipelineChapterWithRuntime(
     }
 
     await hooks.onStageChange?.("reviewing");
-    await hooks.onCheckBudget?.(DIRECTOR_CHAPTER_PREFLIGHT_RESERVE_TOKENS);
+    await hooks.onCheckBudget?.(DIRECTOR_CHAPTER_PREFLIGHT_RESERVE_TOKENS, "review");
     const priorAssessment = attempt > 0 ? originalEvaluation?.result.acceptanceResult?.assessment : undefined;
     latestResult = await deps.finalizeChapterContent({
       novelId,
@@ -304,7 +307,7 @@ export async function runPipelineChapterWithRuntime(
       contextPackage: assembled.contextPackage,
       content,
       repairReviewBaseline: priorAssessment ? {
-        blockingIssues: priorAssessment.blockingIssues,
+        blockingIssues: priorAssessment.blockingIssues.filter(issue => !NON_PATCHABLE_REVIEW_ISSUE_CODES.has(issue.code)),
         missingObligations: priorAssessment.missingObligations,
         repairDirectives: priorAssessment.repairDirectives,
       } : undefined,
@@ -336,6 +339,7 @@ export async function runPipelineChapterWithRuntime(
     const shouldPauseForAcceptance = continuePolicy === "pause" || acceptanceStatus === "needs_manual_review";
     const shouldRepairFromAcceptance = continuePolicy === "repair_once" || acceptanceStatus === "repairable";
     pass = !shouldPauseForAcceptance
+      && !latestResult.runtimePackage.meta?.riskTags?.includes("style_review_unavailable")
       && !shouldRepairFromAcceptance
       && !latestResult.runtimePackage.audit.hasBlockingIssues
       && latestResult.runtimePackage.timelineCheck?.status !== "failed"
@@ -366,7 +370,8 @@ export async function runPipelineChapterWithRuntime(
           pass,
           runtimePackage: latestResult.runtimePackage,
           issues: latestIssues,
-          assessmentVerified: !latestResult.acceptanceResult?.assessment.riskTags?.includes("acceptance_gate_unavailable"),
+          assessmentVerified: !latestResult.acceptanceResult?.assessment.riskTags?.includes("acceptance_gate_unavailable")
+            && !(rewriteGuard && latestResult.acceptanceResult?.assessment.riskTags?.includes("style_review_unavailable")),
           rewriteGuard,
         },
       });
@@ -410,7 +415,7 @@ export async function runPipelineChapterWithRuntime(
     if (shouldDeferNonPatchableReviewRisk(latestResult.runtimePackage)) {
       recoverableRepairFailure = {
         chapterId,
-        message: "章节接收判断暂时不可用，正文已保留，后续需要重新审校或人工复查。",
+        message: "本章部分检查未完成，正文已保留，请从章节页面重新审校。",
         repairMode,
         failureTypes: ["review_gate_unavailable"],
         occurredAt: new Date().toISOString(),
@@ -425,7 +430,7 @@ export async function runPipelineChapterWithRuntime(
 
     await hooks.onStageChange?.("repairing");
     await hooks.onCheckCancelled?.();
-    await hooks.onCheckBudget?.(DIRECTOR_CHAPTER_PREFLIGHT_RESERVE_TOKENS);
+    await hooks.onCheckBudget?.(DIRECTOR_CHAPTER_PREFLIGHT_RESERVE_TOKENS, "repair");
     if (await hooks.onRetryConsumed?.("quality_repair") === false) break;
     retryCountUsed += 1;
     await hooks.onCheckCancelled?.();
@@ -491,8 +496,13 @@ export async function runPipelineChapterWithRuntime(
       })
     : null;
 
+  const reviewRetries = await currentChapterReviewRetryBudget()?.loadSummary();
+  if (reviewRetries) reviewRetries.exhausted = reviewRetries.exhausted && !pass && (
+    latestResult.runtimePackage.meta.riskTags?.some(tag => tag === "acceptance_gate_unavailable" || tag === "style_review_unavailable") === true
+    || repairSelection?.reasonCode === "original_retained_unverified_review");
   const finalResult: PipelineRuntimeResult = {
-    reviewExecuted: true,
+    reviewRetries,
+    reviewExecuted: !latestResult.runtimePackage.meta?.riskTags?.includes("acceptance_gate_unavailable"),
     pass,
     score: latestResult.runtimePackage.audit.score,
     issues: latestIssues,
@@ -502,6 +512,7 @@ export async function runPipelineChapterWithRuntime(
     repairSelection,
     qualityDebtAttribution,
   };
+  if (finalResult.reviewRetries) latestResult.runtimePackage.meta.reviewRetries = finalResult.reviewRetries;
   await hooks.onCheckCancelled?.();
   if (artifactSyncPolicy === "director_v2") {
     await deps.persistFinalizedChapterResult?.(novelId, chapterId, latestResult.finalContent, finalResult);
@@ -519,7 +530,7 @@ export async function resumeFinalizedPipelineChapter(
   hooks: PipelineRuntimeHooks,
 ): Promise<PipelineRuntimeResult> {
   await hooks.onCheckCancelled?.();
-  await hooks.onCheckBudget?.(DIRECTOR_CHAPTER_PREFLIGHT_RESERVE_TOKENS);
+  await hooks.onCheckBudget?.(DIRECTOR_CHAPTER_PREFLIGHT_RESERVE_TOKENS, "artifact_sync");
   const artifactSyncResult = await syncFinalRetainedChapterArtifacts(
     deps, novelId, chapterId, saved.content, options.artifactSyncMode ?? "adaptive",
     saved.result.pass ? "confirmed" : "debt", options.artifactSyncPolicy,
@@ -546,7 +557,7 @@ async function generateNonEmptyDraftFromWriter(input: {
   while (true) {
     await input.hooks.onCheckCancelled?.();
     await input.hooks.onStageChange?.("generating_chapters");
-    await input.hooks.onCheckBudget?.(DIRECTOR_CHAPTER_PREFLIGHT_RESERVE_TOKENS);
+    await input.hooks.onCheckBudget?.(DIRECTOR_CHAPTER_PREFLIGHT_RESERVE_TOKENS, "draft");
     try {
       const generatedDraft = await input.deps.generateDraftFromWriter({
         novelId: input.novelId,
