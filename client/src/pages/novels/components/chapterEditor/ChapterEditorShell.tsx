@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import type { ApiResponse } from "@ai-novel/shared/types/api";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
@@ -18,7 +18,7 @@ import {
   readChapterQualityDebtDetails,
   type ChapterQualityDebtDetails,
 } from "@ai-novel/shared/types/chapterQualityLoop";
-import { AlertTriangle, Loader2 } from "lucide-react";
+import { AlertTriangle, Loader2, PanelLeftOpen, PanelRightOpen } from "lucide-react";
 import { createNovelSnapshot, previewChapterAiRevision, previewChapterCursorContinuation, resolveChapterAuditIssue, reviewNovelChapter, updateNovelChapter } from "@/api/novel";
 import { queryKeys } from "@/api/queryKeys";
 import { Button } from "@/components/ui/button";
@@ -609,6 +609,32 @@ export default function ChapterEditorShell(props: ChapterEditorShellProps) {
     continuationMutation.mutate(request);
   };
 
+  const handleGhostSuggest = useCallback(async (content: string, offset: number): Promise<string | null> => {
+    if (!chapter) {
+      return null;
+    }
+    try {
+      const normalizedContent = normalizeChapterContent(content);
+      const response = await previewChapterCursorContinuation(novelId, chapter.id, {
+        operation: "continue",
+        contentSnapshot: normalizedContent,
+        cursorOffset: offset,
+        context: getParagraphWindow(normalizedContent, { from: offset, to: offset, text: "" }),
+        provider: llm.provider,
+        model: llm.model,
+        temperature: llm.temperature,
+      });
+      const data = response.data;
+      if (!data) {
+        return null;
+      }
+      const active = data.candidates.find((candidate) => candidate.id === data.activeCandidateId) ?? data.candidates[0];
+      return active?.content ?? null;
+    } catch {
+      return null;
+    }
+  }, [chapter, llm.model, llm.provider, llm.temperature, novelId]);
+
   const handleRegenerate = () => {
     if (session.mode === "continuation" && lastContinuationRequestRef.current) {
       continuationMutation.mutate(lastContinuationRequestRef.current);
@@ -693,7 +719,56 @@ export default function ChapterEditorShell(props: ChapterEditorShellProps) {
     ? getParagraphIndicesForRange(contentDraft, { from: cursorOffset, to: cursorOffset })
     : null;
   const cursorTargetLabel = cursorParagraph ? `第 ${cursorParagraph.startIndex + 1} 段的光标处` : "正文光标处";
-  const gridClassName = "xl:grid-cols-[320px_minmax(0,1fr)_400px]";
+  const [layoutMode, setLayoutMode] = useState<"standard" | "wide" | "immersive">(() => {
+    try {
+      const saved = globalThis.localStorage?.getItem("ai-novel:chapter-editor:layout:v1");
+      return saved === "wide" || saved === "immersive" ? saved : "standard";
+    } catch {
+      return "standard";
+    }
+  });
+
+  useEffect(() => {
+    try {
+      globalThis.localStorage?.setItem("ai-novel:chapter-editor:layout:v1", layoutMode);
+    } catch {
+      // Best-effort persistence.
+    }
+  }, [layoutMode]);
+
+  const [panelsCollapsed, setPanelsCollapsed] = useState<{ left: boolean; right: boolean }>(() => {
+    try {
+      const saved = globalThis.localStorage?.getItem("ai-novel:chapter-editor:panels:v1");
+      const parsed = saved ? JSON.parse(saved) as { left?: unknown; right?: unknown } : null;
+      return { left: parsed?.left === true, right: parsed?.right === true };
+    } catch {
+      return { left: false, right: false };
+    }
+  });
+
+  useEffect(() => {
+    try {
+      globalThis.localStorage?.setItem("ai-novel:chapter-editor:panels:v1", JSON.stringify(panelsCollapsed));
+    } catch {
+      // Best-effort persistence.
+    }
+  }, [panelsCollapsed]);
+
+  // Candidate review always gets the full three-column layout: its accept /
+  // reject controls live in the right panel.
+  const effectiveLayout = session.status !== "idle" ? "standard" : layoutMode;
+  const rightPanelCollapsed = panelsCollapsed.right && session.status === "idle";
+  const gridClassName = effectiveLayout === "wide"
+    ? "xl:grid-cols-[minmax(0,1fr)_384px]"
+    : effectiveLayout === "immersive"
+      ? "xl:grid-cols-[minmax(0,1fr)]"
+      : panelsCollapsed.left && rightPanelCollapsed
+        ? "xl:grid-cols-[44px_minmax(0,1fr)_44px]"
+        : panelsCollapsed.left
+          ? "xl:grid-cols-[44px_minmax(0,1fr)_400px]"
+          : rightPanelCollapsed
+            ? "xl:grid-cols-[320px_minmax(0,1fr)_44px]"
+            : "xl:grid-cols-[320px_minmax(0,1fr)_400px]";
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-4">
@@ -729,7 +804,32 @@ export default function ChapterEditorShell(props: ChapterEditorShellProps) {
           {hasExternalChange ? <Button size="sm" variant="outline" onClick={draft.loadSavedVersion}>加载新保存版本</Button> : null}
         </div>
       ) : null}
+      {effectiveLayout !== "standard" ? (
+        <div className="flex shrink-0 flex-wrap items-center gap-2 text-sm">
+          {props.headerExtra}
+          {onBack ? <Button size="sm" variant="outline" onClick={() => leaveEditor(onBack)}>{props.backLabel ?? "返回章节执行页"}</Button> : null}
+          <span className="truncate font-medium">第 {chapter.order} 章 · {chapter.title?.trim() || "未命名章节"}</span>
+          <span className="shrink-0 text-xs text-muted-foreground">{wordCount} 字 · {headerSaveLabel}</span>
+          <Button size="sm" onClick={() => saveMutation.mutate(contentDraft)} disabled={!isDirty || saveMutation.isPending}>
+            {saveMutation.isPending ? "保存中..." : "保存"}
+          </Button>
+          <Button size="sm" variant="outline" onClick={() => setIsVersionDrawerOpen(true)}>查看本章版本</Button>
+          {(workspace?.diagnosticCards.length ?? 0) > 0 ? (
+            <Button size="sm" variant="ghost" onClick={() => setLayoutMode("standard")}>
+              待处理问题 {workspace?.diagnosticCards.length} 项 · 回标准布局处理
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
       <div className={`grid min-h-0 flex-1 gap-4 overflow-y-auto xl:overflow-hidden ${gridClassName}`}>
+        {effectiveLayout === "standard" && panelsCollapsed.left ? (
+        <div className="order-1 flex min-h-0 flex-col items-center gap-2 py-2 xl:order-none">
+          <Button size="icon" variant="ghost" className="h-8 w-8" title="展开左栏" onClick={() => setPanelsCollapsed((current) => ({ ...current, left: false }))}>
+            <PanelLeftOpen className="h-4 w-4" />
+          </Button>
+          <span className="text-xs text-muted-foreground" style={{ writingMode: "vertical-rl" }}>本章信息</span>
+        </div>
+        ) : effectiveLayout === "standard" ? (
         <div className="order-1 min-h-0 overflow-y-auto xl:order-none">
           <ChapterEditorSidebar
             chapter={chapter}
@@ -756,12 +856,25 @@ export default function ChapterEditorShell(props: ChapterEditorShellProps) {
             }}
             isResolvingDiagnostic={resolveDiagnosticMutation.isPending}
             diagnosticsDisabled={isBusy || session.status !== "idle"}
+            onCollapse={() => setPanelsCollapsed((current) => ({ ...current, left: true }))}
           />
         </div>
+        ) : null}
 
-        <div className="relative order-3 min-h-0 overflow-hidden xl:order-none">
+        <div className={`relative order-3 min-h-0 overflow-hidden xl:order-none ${effectiveLayout === "immersive" ? "mx-auto w-full max-w-[880px]" : ""}`}>
           <ChapterTextEditor
             value={contentDraft}
+            documentKey={chapter.id}
+            onQuickOperation={(operation) => handleRunOperation(operation)}
+            onQuickInstruction={(instruction) => handleRunOperation("custom", instruction)}
+            onGhostSuggest={handleGhostSuggest}
+            ghostSuspended={isBusy || session.status !== "idle"}
+            layoutMode={layoutMode}
+            onLayoutModeChange={setLayoutMode}
+            headerExtra={effectiveLayout === "standard" ? props.headerExtra : undefined}
+            diagnosticRanges={(workspace?.diagnosticCards ?? [])
+              .map((card) => card.anchorRange)
+              .filter((range): range is { from: number; to: number } => Boolean(range))}
             readOnly={session.status !== "idle"}
             onChange={(next) => {
               draft.setContentDraft(next);
@@ -795,6 +908,14 @@ export default function ChapterEditorShell(props: ChapterEditorShellProps) {
           />
         </div>
 
+        {effectiveLayout === "standard" && rightPanelCollapsed ? (
+        <div className="order-2 flex min-h-0 flex-col items-center gap-2 py-2 xl:order-none">
+          <Button size="icon" variant="ghost" className="h-8 w-8" title="展开右栏" onClick={() => setPanelsCollapsed((current) => ({ ...current, right: false }))}>
+            <PanelRightOpen className="h-4 w-4" />
+          </Button>
+          <span className="text-xs text-muted-foreground" style={{ writingMode: "vertical-rl" }}>AI 改写</span>
+        </div>
+        ) : effectiveLayout !== "immersive" ? (
         <div className="order-2 min-h-0 overflow-hidden xl:order-none">
             <ChapterEditorDirectorPanel
               workspace={workspace}
@@ -835,8 +956,10 @@ export default function ChapterEditorShell(props: ChapterEditorShellProps) {
               onAccept={() => acceptMutation.mutate()}
               onReject={handleReject}
               onRegenerate={handleRegenerate}
+              onCollapse={effectiveLayout === "standard" ? () => setPanelsCollapsed((current) => ({ ...current, right: true })) : undefined}
             />
         </div>
+        ) : null}
       </div>
       <ChapterVersionDrawer
         novelId={novelId}

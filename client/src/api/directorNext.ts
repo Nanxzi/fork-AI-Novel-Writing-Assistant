@@ -3,6 +3,7 @@ import { apiClient, type ApiHttpError } from "./client";
 import type {SimpleCreationShelfProjection,VolumePlanDocument} from "@ai-novel/shared/types/novel";
 import {getSimpleCreationShelf,getNovelVolumeWorkspace} from "./novel";
 import type {DirectorWorkspaceMaterials,DirectorWorkspaceLedgers} from "@ai-novel/shared/types/director/workspace";
+import type {DirectorRuntimeStatus, DirectorRecordWarning} from "@ai-novel/shared/types/director/runtimeStatus";
 
 export type DirectorMode = "queued" | "running" | "waiting_gate" | "paused" | "completed" | "failed" | "cancelled";
 export type DirectorDriver = "auto" | "assisted";
@@ -18,7 +19,7 @@ export type DirectorWorkspace = Pick<SimpleCreationShelfProjection,"novel"|"chap
   executionPlans?: {id:string;order:number;title:string;taskSheet:string|null;sceneCards:string|null;targetWordCount:number|null;mustAvoid:string|null}[];
 };
 export async function getDirectorWorkspace(novelId:string): Promise<ApiResponse<DirectorWorkspace>> {
-  try {return (await apiClient.get(`/director-next/novels/${encodeURIComponent(novelId)}/workspace`,{silentErrorStatuses:[404]})).data;}
+  try {return (await apiClient.get(`/director-next/novels/${encodeURIComponent(novelId)}/workspace`,{silentErrorStatuses:[404],errorPresentation:"inline"})).data;}
   catch(error) {
     if ((error as ApiHttpError).status !== 404) throw error;
     const [shelf,planning]=await Promise.all([getSimpleCreationShelf(novelId),getNovelVolumeWorkspace(novelId)]);
@@ -58,6 +59,7 @@ export interface DashboardView {
   chapterProgress: {from:number;to:number;done:number;total:number;current:{order:number;title:string;phase:"generating_chapters"|"reviewing"|"repairing"|"finalizing"}|null}|null;
   nextLaunchRange: {from:number;to:number}|null;
   chapterBudget?: import("@ai-novel/shared/types/director/chapterBudget").DirectorChapterBudgetView;
+  unknownClaims?: import("@ai-novel/shared/types/director/unknownClaims").DirectorUnknownClaimsView;
   workspaceActivity?: import("@ai-novel/shared/types/director/generation").DirectorWorkspaceActivity;
   progress: { done: number; total: number; source: "artifact_ledger" };
   debts: { count: number; chapterOrders: number[] };
@@ -102,7 +104,7 @@ export type DirectorCommand =
     executionRange?: {from: number; to: number}; issuePolicyMode?: "completion_first" | "quality_first";
   } }
   | { type: "resolve_gate"; runId: string; decision: "confirm" | "confirm_after_edit" | "regenerate"; guidance?: string; chapterPlanEdit?: import("@ai-novel/shared/types/director/revision").ChapterPlanEdit; expectedVersion: number; idempotencyKey: string }
-  | { type: "resume"; runId: string; expectedVersion: number; idempotencyKey: string; chapterBudget?: import("@ai-novel/shared/types/director/chapterBudget").DirectorChapterBudgetGrant }
+  | { type: "resume"; runId: string; expectedVersion: number; idempotencyKey: string; chapterBudget?: import("@ai-novel/shared/types/director/chapterBudget").DirectorChapterBudgetGrant; resolveUnknownClaims?: import("@ai-novel/shared/types/director/unknownClaims").DirectorUnknownClaimResolution }
   | { type: "handoff"; runId: string; toDriver: DirectorDriver; expectedVersion: number; idempotencyKey: string }
   | { type: "cancel"; runId: string; expectedVersion: number; idempotencyKey: string };
 
@@ -110,7 +112,7 @@ export async function getDirectorSummary(novelId: string): Promise<ApiResponse<D
   try {
     const { data } = await apiClient.get<ApiResponse<DashboardView>>(
       `/director-next/novels/${encodeURIComponent(novelId)}/current`,
-      { silentErrorStatuses: [404] },
+      { silentErrorStatuses: [404], errorPresentation: "inline" },
     );
     return data;
   } catch (error) {
@@ -140,6 +142,7 @@ export async function getDirectorDetail(novelId: string): Promise<ApiResponse<Di
 export async function getDirectorRunDetail(runId: string): Promise<ApiResponse<DirectorRunDetail>> {
   const { data } = await apiClient.get<ApiResponse<DashboardView & { timeline: DirectorTimelineEvent[] }>>(
     `/director-next/runs/${encodeURIComponent(runId)}`,
+    {errorPresentation: "inline"},
   );
   return {
     ...data,
@@ -149,9 +152,15 @@ export async function getDirectorRunDetail(runId: string): Promise<ApiResponse<D
   };
 }
 
-export async function listDirectorRuns(options?: { needsAttention?: boolean; limit?: number }): Promise<ApiResponse<DirectorRunRecord[]>> {
-  const { data } = await apiClient.get<ApiResponse<DirectorRunRecord[]>>("/director-next/records", {
+export async function getDirectorRuntimeStatus(novelId: string): Promise<ApiResponse<DirectorRuntimeStatus>> {
+  return (await apiClient.get<ApiResponse<DirectorRuntimeStatus>>(`/director-next/novels/${encodeURIComponent(novelId)}/runtime-status`,
+    {errorPresentation: "inline"})).data;
+}
+
+export async function listDirectorRuns(options?: { needsAttention?: boolean; limit?: number }): Promise<ApiResponse<DirectorRunRecord[]> & {warnings?: DirectorRecordWarning[]}> {
+  const { data } = await apiClient.get<ApiResponse<DirectorRunRecord[]> & {warnings?: DirectorRecordWarning[]}>("/director-next/records", {
     params: options,
+    errorPresentation: "inline",
   });
   return data;
 }

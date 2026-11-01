@@ -186,6 +186,81 @@ export function buildSelectionRangeFromValue(
   };
 }
 
+function findPointInNode(node: Descendant, path: number[], offset: number): EditorPointLike | null {
+  if ("text" in node && typeof node.text === "string") {
+    return { path, offset: Math.max(0, Math.min(offset, node.text.length)) };
+  }
+  if (!("children" in node) || !Array.isArray(node.children)) {
+    return null;
+  }
+  let remaining = offset;
+  for (let index = 0; index < node.children.length; index += 1) {
+    const child = node.children[index] as Descendant;
+    const childLength = getNodeTextLength(child);
+    if (remaining <= childLength) {
+      return findPointInNode(child, [...path, index], remaining);
+    }
+    remaining -= childLength;
+  }
+  const lastIndex = node.children.length - 1;
+  if (lastIndex < 0) {
+    return { path, offset: 0 };
+  }
+  const lastChild = node.children[lastIndex] as Descendant;
+  return findPointInNode(lastChild, [...path, lastIndex], getNodeTextLength(lastChild));
+}
+
+/** Inverse of getCursorOffsetFromValue: map a plain-text offset back to an editor point. */
+export function getPointFromAbsoluteOffset(
+  value: Value,
+  offset: number,
+): EditorPointLike | null {
+  const nodes = value as Descendant[];
+  if (nodes.length === 0) {
+    return null;
+  }
+  let remaining = Math.max(0, offset);
+  for (let index = 0; index < nodes.length; index += 1) {
+    const textLength = getNodeTextLength(nodes[index]);
+    if (remaining <= textLength) {
+      return findPointInNode(nodes[index], [index], remaining);
+    }
+    remaining -= textLength + 2;
+  }
+  const lastIndex = nodes.length - 1;
+  return findPointInNode(nodes[lastIndex], [lastIndex], getNodeTextLength(nodes[lastIndex]));
+}
+
+export interface ParagraphSpan {
+  /** First paragraph index that differs. */
+  start: number;
+  /** One past the last differing paragraph in the old text. */
+  oldEnd: number;
+  /** One past the last differing paragraph in the new text. */
+  newEnd: number;
+}
+
+/**
+ * Smallest paragraph span that turns oldParagraphs into newParagraphs:
+ * replace oldParagraphs[start..oldEnd) with newParagraphs[start..newEnd).
+ * Lets external content updates patch only the changed paragraphs so the
+ * editor keeps its history and selection.
+ */
+export function computeParagraphSpan(oldParagraphs: string[], newParagraphs: string[]): ParagraphSpan {
+  let start = 0;
+  const minLength = Math.min(oldParagraphs.length, newParagraphs.length);
+  while (start < minLength && oldParagraphs[start] === newParagraphs[start]) {
+    start += 1;
+  }
+  let oldEnd = oldParagraphs.length;
+  let newEnd = newParagraphs.length;
+  while (oldEnd > start && newEnd > start && oldParagraphs[oldEnd - 1] === newParagraphs[newEnd - 1]) {
+    oldEnd -= 1;
+    newEnd -= 1;
+  }
+  return { start, oldEnd, newEnd };
+}
+
 export function normalizeValuePayload(payload: unknown): Value {
   if (Array.isArray(payload)) {
     return payload as Value;

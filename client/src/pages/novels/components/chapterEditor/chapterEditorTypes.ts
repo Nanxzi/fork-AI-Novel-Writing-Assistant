@@ -10,6 +10,8 @@ import type {
   ChapterEditorWorkspaceResponse,
 } from "@ai-novel/shared/types/novel";
 
+export type ChapterEditorLayoutMode = "standard" | "wide" | "immersive";
+
 export interface ChapterEditorSelectionRange {
   from: number;
   to: number;
@@ -41,6 +43,8 @@ export interface ChapterEditorCursorRequestBuilderInput {
 export interface ChapterEditorShellProps {
   novelId: string;
   chapter: Chapter | undefined;
+  /** Extra controls rendered at the left of the editor toolbar row (host-page actions). */
+  headerExtra?: import("react").ReactNode;
   workspace: ChapterEditorWorkspaceResponse | null;
   workspaceStatus: "loading" | "ready" | "error";
   onBack?: () => void;

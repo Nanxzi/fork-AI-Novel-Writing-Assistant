@@ -37,6 +37,9 @@ export default function AppLayout() {
   const [workspaceNavMode, setWorkspaceNavMode] = useState<"workspace" | "project">("project");
   const isMobileViewport = useIsMobileViewport();
   const isNovelPreview = Boolean(matchPath("/novels/:id/preview", location.pathname));
+  // The chapter editor is a focused writing surface: the workspace rail
+  // (novel nav + director progress) stays hidden while it is open.
+  const isChapterEditor = Boolean(matchPath("/novels/:id/chapters/:chapterId", location.pathname));
 
   const workspaceRoute = useMemo(() => {
     const editMatch = matchPath("/novels/:id/edit", location.pathname);
@@ -147,7 +150,7 @@ export default function AppLayout() {
           onWorkspaceNavModeChange={isNovelWorkspace ? setWorkspaceNavMode : undefined}
         />
         <div className="flex h-[calc(100dvh-4rem)] min-h-0">
-          {!isDirectorWorkbench ? <div className={useMobileFullWidthContent ? "hidden md:block" : "shrink-0"}>
+          {!isDirectorWorkbench && !isChapterEditor ? <div className={useMobileFullWidthContent ? "hidden md:block" : "shrink-0"}>
             {isNovelWorkspace && workspaceNavMode === "workspace" && workspaceRoute ? (
               <NovelWorkspaceRail
                 novelId={workspaceRoute.novelId}

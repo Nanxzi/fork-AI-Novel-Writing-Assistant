@@ -1,5 +1,6 @@
+import { recordStructuredBusinessFailure } from "../../platform/llm/diagnostics/StructuredDiagnosticStore";
 import {registerPromptCacheBoundary} from "./cache";
-import { currentModelRequestBudget } from "../../platform/llm/retries";
+import { claimModelRequest, currentModelRequestBudget } from "../../platform/llm/retries";
 import { HumanMessage, type BaseMessage, type BaseMessageChunk } from "@langchain/core/messages";
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
 import { getLLM, getResolvedLLMClientOptionsFromInstance } from "../../llm/factory";
@@ -106,7 +107,7 @@ function buildPromptInvocationMeta(
   };
 }
 
-async function resolvePromptOverlaysForAsset(input: {
+export async function resolvePromptOverlaysForAsset(input: {
   asset: PromptAsset<unknown, unknown, unknown>;
   contextBlocks?: Parameters<typeof selectContextBlocks>[0];
   options?: PromptExecutionOptions;
@@ -588,6 +589,7 @@ async function resolveStructuredOutput<I, O, R = O>(input: {
         postValidateFailureRecovered: false,
       };
     } catch (error) {
+      await recordStructuredBusinessFailure(currentResult.diagnostics?.attemptId);
       if (semanticRetryAttempts >= maxSemanticRetryAttempts || requestBudget?.remaining() === 0 || (sharedCorrectionBudget !== undefined
         && totalRepairAttempts + semanticRetryAttempts >= sharedCorrectionBudget)) {
         if (input.asset.postValidateFailureRecovery) {
@@ -909,6 +911,7 @@ export async function runTextPrompt<I>(input: {
       promptMeta: prepared.invocation,
     });
     liveSession.phase("streaming", "模型正在返回内容");
+    await claimModelRequest({configuration:getResolvedLLMClientOptionsFromInstance(llm),input:messages,options:buildPromptCallOptions(input.options)});
     const stream = await liveSession.observe(() => llm.stream(messages, buildPromptCallOptions(input.options)));
     let rawOutput = "";
     let tokenUsage: LlmTokenUsageSnapshot | null = null;
@@ -1018,6 +1021,7 @@ export async function streamTextPrompt<I>(input: {
       promptMeta: prepared.invocation,
     });
     liveSession.phase("streaming", "模型正在返回内容");
+    await claimModelRequest({configuration:getResolvedLLMClientOptionsFromInstance(llm),input:messages,options:buildPromptCallOptions(input.options)});
     const rawStream = await liveSession.observe(() => llm.stream(messages, buildPromptCallOptions(input.options)));
     captured = captureStreamOutput(
       rawStream as AsyncIterable<BaseMessageChunk>,

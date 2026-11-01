@@ -79,16 +79,16 @@ export default function NovelChapterEdit() {
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-4">
-      <div className="flex shrink-0 justify-end">
-        <Button asChild variant="outline">
-          <Link to={`/prompt-workbench?experience=writing&novelId=${encodeURIComponent(id)}&chapterId=${encodeURIComponent(chapterId)}`}>
-            <FlaskConical className="mr-2 h-4 w-4" />
-            正文效果实验室
-          </Link>
-        </Button>
-      </div>
       <ChapterEditorShell
         key={chapter.id}
+        headerExtra={(
+          <Button asChild size="sm" variant="outline">
+            <Link to={`/prompt-workbench?experience=writing&novelId=${encodeURIComponent(id)}&chapterId=${encodeURIComponent(chapterId)}`}>
+              <FlaskConical className="mr-2 h-4 w-4" />
+              正文效果实验室
+            </Link>
+          </Button>
+        )}
         novelId={id}
         chapter={chapter}
         workspace={chapterEditorWorkspaceQuery.data?.data ?? null}

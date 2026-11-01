@@ -2,16 +2,23 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
+const Database = require("better-sqlite3");
 
 const serverRoot = path.resolve(__dirname, "../..");
 const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ai-novel-quality-"));
+const databasePath = path.join(temporaryRoot, "isolated.db");
+const database = new Database(databasePath);
+try { database.pragma("journal_mode = WAL"); }
+finally { database.close(); }
 const env = { ...process.env, NODE_ENV: "test", AI_NOVEL_RUNTIME: "desktop",
   AI_NOVEL_APP_DATA_DIR: temporaryRoot,
-  DATABASE_URL: `file:${path.join(temporaryRoot, "isolated.db").replace(/\\/g, "/")}` };
+  DATABASE_URL: `file:${databasePath.replace(/\\/g, "/")}` };
 
 // This focused release gate uses existing compiled output; builds belong to the caller.
 const tests = [
   "tests/testInfrastructure/codePolicy.test.js",
+  "tests/testInfrastructure/qualityRunnerIsolation.test.js",
+  "tests/shortStoryLengthContext.test.js",
   "tests/serverDependencyBoundaries.test.js",
   "tests/timelineFinalizationClaims.test.js",
   "tests/novelReadModels.test.js",

@@ -1,3 +1,4 @@
+import { referenceContract, parseShortStoryReference } from "../../creation-studio/reference";
 import type {
   CreationDirection,
   CreationIntentInterpretation,
@@ -12,6 +13,7 @@ import {
   shortStoryPlanPrompt,
   shortStorySegmentWritePrompt,
 } from "../../../../prompting/prompts/shortStory/shortStory.prompts";
+import { ProductionVersionConflictError } from "../../../production/common";
 import { NovelWorkflowService } from "../../../../services/novel/workflow/NovelWorkflowService";
 import {
   buildShortStoryWriterContextBlocks,
@@ -19,6 +21,14 @@ import {
   shortStoryProductionFoundationText,
   shortStoryPlatformText,
 } from "./shortStoryPromptContext";
+import {
+  contextWindowForConfiguredModel,
+  postRepairKeepsManuscript,
+  qualityDebtFromAudit,
+  ShortStoryAuditBudgetError,
+  shortStoryOnV2Enabled,
+  withShortStoryAuditBudget,
+} from "./shortStoryAuditPolicy";
 
 interface ActiveIntent {
   originalIdea: string;
@@ -39,9 +49,22 @@ function countWords(content: string): number {
   return content.replace(/\s+/g, "").length;
 }
 
+import { shortStoryRevisionService } from "./ShortStoryRevisionService";
+import { isLegacyRevision } from "../domain/revisionState";
+
 export class ShortStoryProductionService {
   private readonly running = new Set<string>();
   private readonly workflowService = new NovelWorkflowService();
+  private readonly v2Enabled: () => boolean;
+  private readonly readAuditContextWindow: (provider: string, model: string) => Promise<number | null>;
+
+  constructor(deps: {
+    v2Enabled?: () => boolean;
+    readAuditContextWindow?: (provider: string, model: string) => Promise<number | null>;
+  } = {}) {
+    this.v2Enabled = deps.v2Enabled ?? (() => shortStoryOnV2Enabled());
+    this.readAuditContextWindow = deps.readAuditContextWindow ?? (async (provider, model) => contextWindowForConfiguredModel(provider, model));
+  }
 
   schedule(taskId: string): void {
     setImmediate(() => {
@@ -57,6 +80,8 @@ export class ShortStoryProductionService {
         lane: "creation_studio",
         novelId: { not: null },
         status: { in: ["queued", "running"] },
+        pendingManualRecovery: false,
+        novel: { narrativeForm: "short_story" },
       },
       select: { id: true },
       orderBy: { updatedAt: "asc" },
@@ -71,13 +96,26 @@ export class ShortStoryProductionService {
     if (this.running.has(taskId)) return;
     this.running.add(taskId);
     try {
+      const taskState = await prisma.novelWorkflowTask.findUnique({ where: { id: taskId } });
+      if (!taskState || taskState.checkpointType === "replan_required" || taskState.pendingManualRecovery
+        || taskState.cancelRequestedAt || (taskState.status !== "queued" && taskState.status !== "running")) return;
+      if (taskState.shortStoryOperationId) {
+        await shortStoryRevisionService.run(taskState.shortStoryOperationId);
+        return;
+      }
       const context = await this.loadContext(taskId);
+      if (isLegacyRevision(context.task, context.intentRow.source)) {
+        await this.workflowService.markTaskFailed(taskId, "请重新预览并确认修改，已保存的正文和快照会保留。", {
+          stage: "short_story_review", itemKey: "revision_apply", itemLabel: "请重新预览修改范围",
+        });
+        return;
+      }
       const plan = await this.ensurePlan(context);
       const completedSegments = await this.writePendingSegments(context, plan);
       await this.auditAndRepair(context, plan, completedSegments);
     } catch (error) {
       const task = await prisma.novelWorkflowTask.findUnique({ where: { id: taskId } });
-      if (task?.checkpointType !== "replan_required" && task?.status !== "cancelled") {
+      if (!task?.shortStoryOperationId && task?.checkpointType !== "replan_required" && task?.status !== "cancelled") {
         const message = error instanceof Error ? error.message : "短篇生成未完成。";
         await this.workflowService.markTaskFailed(taskId, message, {
           stage: this.resolveFailureStage(task?.currentItemKey),
@@ -133,6 +171,7 @@ export class ShortStoryProductionService {
       targetWordCount: task.novel.targetWordCount ?? interpretation.recommendedTargetWordCount,
       platform: parseWritingPlatformSnapshot(task.novel.writingPlatformSnapshotJson),
       productionFoundation: shortStoryProductionFoundationText(task.novel),
+      reference: referenceContract(parseShortStoryReference(task.novel.shortStoryReferenceJson, Boolean(task.novel.referenceBookAnalysisId))),
     };
   }
 
@@ -167,7 +206,7 @@ export class ShortStoryProductionService {
         direction: context.intent.direction,
         targetWordCount: context.targetWordCount,
         writingPlatform: shortStoryPlatformText(context.platform, "planning"),
-        productionFoundation: context.productionFoundation,
+        productionFoundation: context.productionFoundation, reference: context.reference,
       },
       options: {
         taskId: context.task.id,
@@ -262,7 +301,7 @@ export class ShortStoryProductionService {
           previousContentTail,
           writingPlatform: shortStoryPlatformText(context.platform, "drafting"),
           bookStyle: context.novel.styleTone ?? context.intent.direction.styleKeywords.join("、"),
-          productionFoundation: context.productionFoundation,
+          productionFoundation: context.productionFoundation, reference: context.reference,
         };
         const generated = await runStructuredPrompt({
           asset: shortStorySegmentWritePrompt,
@@ -275,7 +314,6 @@ export class ShortStoryProductionService {
             itemKey: `segment:${row.order}`,
             entrypoint: "creation_studio",
             temperature: 0.78,
-            maxTokens: Math.min(12000, Math.max(2500, segmentPlan.targetWordCount * 2)),
           },
         });
         const saved = await prisma.shortStorySegment.updateMany({
@@ -326,27 +364,8 @@ export class ShortStoryProductionService {
       itemLabel: "正在检查完整成稿",
       progress: 0.9,
     });
-    const audited = await runStructuredPrompt({
-      asset: shortStoryFullAuditPrompt,
-      promptInput: {
-        originalIdea: context.intent.originalIdea,
-        understanding: context.intent.understanding,
-        direction: context.intent.direction,
-        plan: plan.contract,
-        content,
-        writingPlatform: shortStoryPlatformText(context.platform, "auditing"),
-        productionFoundation: context.productionFoundation,
-      },
-      options: {
-        taskId: context.task.id,
-        novelId: context.novel.id,
-        stage: "short_story_review",
-        itemKey: "full_audit",
-        entrypoint: "creation_studio",
-        temperature: 0.25,
-        maxTokens: 5000,
-      },
-    });
+    const audited = await this.auditManuscript(context, plan, content, "full_audit");
+    if (!audited) return;
     await prisma.shortStoryPlan.update({
       where: { id: plan.row.id },
       data: { auditResultJson: JSON.stringify(audited.output) },
@@ -364,7 +383,31 @@ export class ShortStoryProductionService {
 
     let qualityDebt: string[] = [];
     if (audited.output.decision === "patchable") {
-      qualityDebt = await this.applySingleRepair(context, plan, segments, audited.output, content);
+        const repaired = await this.generateSingleRepair(context, plan, segments, audited.output, content);
+        const candidate = segments.map(segment => ({ ...segment,
+          content: segment.userEditedAt ? segment.content : repaired.patches.find(patch => patch.segmentOrder === segment.order)?.content.trim() ?? segment.content,
+        }));
+        const reviewed = await this.auditManuscript(context, plan, candidate.map(segment => segment.content.trim()).join("\n\n"), "repair_review");
+        if (!reviewed) return;
+        console.info("[short-story.review]", { taskId: context.task.id, originalWordCount: countWords(content),
+          candidateWordCount: countWords(candidate.map(segment => segment.content).join("\n\n")), decision: reviewed.output.decision });
+        if (postRepairKeepsManuscript(reviewed.output.decision)) {
+          await prisma.$transaction(async tx => {
+            const current = await tx.shortStorySegment.findMany({ where: { planId: plan.row.id } });
+            if (current.length !== segments.length || segments.some(before => !current.some(row => row.id === before.id && row.version === before.version))) {
+              throw new ProductionVersionConflictError();
+            }
+            for (const segment of candidate) {
+              if (segment.content === segments.find(row => row.id === segment.id)!.content) continue;
+              const saved = await tx.shortStorySegment.updateMany({ where: { id: segment.id, version: segment.version, userEditedAt: null },
+                data: { content: segment.content, version: { increment: 1 }, generatedAt: new Date(), qualityResultJson: JSON.stringify({ repairedFromAudit: true }) } });
+              if (saved.count !== 1) throw new ProductionVersionConflictError();
+            }
+            await tx.shortStoryPlan.update({ where: { id: plan.row.id }, data: { auditResultJson: JSON.stringify(reviewed.output) } });
+          });
+        } else {
+          qualityDebt = qualityDebtFromAudit(audited.output);
+        }
     }
     await prisma.shortStoryPlan.update({
       where: { id: plan.row.id },
@@ -384,13 +427,54 @@ export class ShortStoryProductionService {
     });
   }
 
-  private async applySingleRepair(
+  private async auditManuscript(
+    context: Awaited<ReturnType<ShortStoryProductionService["loadContext"]>>,
+    plan: Awaited<ReturnType<ShortStoryProductionService["ensurePlan"]>>,
+    content: string,
+    itemKey: "full_audit" | "repair_review",
+  ) {
+    const request = {
+      asset: shortStoryFullAuditPrompt,
+      promptInput: {
+        originalIdea: context.intent.originalIdea,
+        understanding: context.intent.understanding,
+        direction: context.intent.direction,
+        plan: plan.contract,
+        content,
+        writingPlatform: shortStoryPlatformText(context.platform, "auditing"),
+        productionFoundation: context.productionFoundation, reference: context.reference,
+      },
+      options: {
+        taskId: context.task.id,
+        novelId: context.novel.id,
+        stage: "short_story_review",
+        itemKey,
+        entrypoint: "creation_studio",
+        temperature: 0.25,
+        maxTokens: this.v2Enabled() ? undefined : 5000,
+      },
+    };
+    try {
+      return await (this.v2Enabled()
+        ? withShortStoryAuditBudget(this.readAuditContextWindow, () => runStructuredPrompt(request))
+        : runStructuredPrompt(request));
+    } catch (error) {
+      if (!(error instanceof ShortStoryAuditBudgetError)) throw error;
+      await this.workflowService.recordCheckpoint(context.task.id, {
+        stage: "short_story_review", checkpointType: "step_review_required", checkpointSummary: error.message,
+        itemLabel: "请检查模型的上下文范围", progress: 0.9,
+      });
+      return null;
+    }
+  }
+
+  private async generateSingleRepair(
     context: Awaited<ReturnType<ShortStoryProductionService["loadContext"]>>,
     plan: Awaited<ReturnType<ShortStoryProductionService["ensurePlan"]>>,
     segments: Awaited<ReturnType<ShortStoryProductionService["writePendingSegments"]>>,
     audit: ShortStoryQualityResult,
     content: string,
-  ): Promise<string[]> {
+  ) {
     await this.workflowService.markTaskRunning(context.task.id, {
       stage: "short_story_review",
       itemKey: "single_patch",
@@ -412,7 +496,7 @@ export class ShortStoryProductionService {
           humanEdited: Boolean(segment.userEditedAt),
         })),
         writingPlatform: shortStoryPlatformText(context.platform, "repairing"),
-        productionFoundation: context.productionFoundation,
+        productionFoundation: context.productionFoundation, reference: context.reference,
       },
       options: {
         taskId: context.task.id,
@@ -424,20 +508,7 @@ export class ShortStoryProductionService {
         maxTokens: 12000,
       },
     });
-    for (const patch of repaired.output.patches) {
-      const target = segments.find((segment) => segment.order === patch.segmentOrder);
-      if (!target || target.userEditedAt) continue;
-      await prisma.shortStorySegment.updateMany({
-        where: { id: target.id, version: target.version, userEditedAt: null },
-        data: {
-          content: patch.content.trim(),
-          version: { increment: 1 },
-          generatedAt: new Date(),
-          qualityResultJson: JSON.stringify({ repairedFromAudit: true }),
-        },
-      });
-    }
-    return repaired.output.residualQualityDebt;
+    return repaired.output;
   }
 
   private async assertRunnable(taskId: string): Promise<void> {
@@ -451,7 +522,7 @@ export class ShortStoryProductionService {
   }
 
   private resolveFailureStage(itemKey: string | null | undefined) {
-    if (itemKey === "full_audit" || itemKey === "single_patch") return "short_story_review" as const;
+    if (itemKey === "full_audit" || itemKey === "repair_review" || itemKey === "single_patch") return "short_story_review" as const;
     if (itemKey?.startsWith("segment:")) return "short_story_draft" as const;
     return "short_story_plan" as const;
   }

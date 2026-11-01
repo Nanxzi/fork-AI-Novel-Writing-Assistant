@@ -1,5 +1,6 @@
 import type { ChapterEditorCandidate, ChapterEditorWorkspaceResponse } from "@ai-novel/shared/types/novel";
 import type { ChapterEditorDiffChange } from "@ai-novel/shared/types/chapterEditor/document";
+import { PanelRightClose } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { ChapterEditorSessionState } from "./chapterEditorTypes";
 import { ChapterEditorActions, type ChapterEditorActionsProps } from "./assistant";
@@ -21,6 +22,7 @@ interface ChapterEditorDirectorPanelProps extends ChapterEditorActionsProps {
   onAccept: () => void;
   onReject: () => void;
   onRegenerate: () => void;
+  onCollapse?: () => void;
 }
 
 export default function ChapterEditorDirectorPanel(props: ChapterEditorDirectorPanelProps) {
@@ -32,10 +34,17 @@ export default function ChapterEditorDirectorPanel(props: ChapterEditorDirectorP
     <div className="flex min-h-0 flex-col overflow-hidden bg-background xl:h-full">
       <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border/50 px-4 py-3">
         <div className="text-sm font-medium">AI 修改与续写</div>
-        {!isIdle ? <div className="flex gap-2">
-          <Button size="sm" variant={session.viewMode === "block" ? "default" : "outline"} onClick={() => onChangeViewMode("block")}>段落对比</Button>
-          <Button size="sm" variant={session.viewMode === "inline" ? "default" : "outline"} onClick={() => onChangeViewMode("inline")}>细节标记</Button>
-        </div> : null}
+        <div className="flex items-center gap-2">
+          {!isIdle ? <>
+            <Button size="sm" variant={session.viewMode === "block" ? "default" : "outline"} onClick={() => onChangeViewMode("block")}>段落对比</Button>
+            <Button size="sm" variant={session.viewMode === "inline" ? "default" : "outline"} onClick={() => onChangeViewMode("inline")}>细节标记</Button>
+          </> : null}
+          {props.onCollapse ? (
+            <Button size="icon" variant="ghost" className="h-8 w-8" title="收起右栏" onClick={props.onCollapse}>
+              <PanelRightClose className="h-4 w-4" />
+            </Button>
+          ) : null}
+        </div>
       </div>
       <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-4">
         {isIdle ? <>

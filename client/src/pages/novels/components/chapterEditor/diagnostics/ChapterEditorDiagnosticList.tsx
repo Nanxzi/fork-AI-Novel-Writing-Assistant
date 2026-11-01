@@ -22,7 +22,7 @@ function DiagnosticRow({ card, props }: { card: ChapterEditorDiagnosticCard; pro
         <div className="text-sm font-medium">{card.title}</div>
         <div className="mt-1 text-xs text-muted-foreground">{card.paragraphLabel || "整章"}</div>
       </div>
-      <p className="text-sm leading-6 text-muted-foreground">{card.problemSummary}</p>
+      <p className={`text-sm leading-6 text-muted-foreground ${selected ? "" : "line-clamp-2"}`}>{card.problemSummary}</p>
       <div className="flex flex-wrap gap-2">
         <Button size="sm" variant="outline" disabled={props.disabled} onClick={() => props.onFocus(card)}>
           {selected ? "取消定位" : "定位到正文"}
