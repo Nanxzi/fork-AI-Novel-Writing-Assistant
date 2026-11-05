@@ -12,14 +12,16 @@ export interface VolumeChapterListStepInput<Provider extends string, Document ex
   model?: string;
   temperature?: number;
   guidance?: string;
+  estimatedChapterCount?: number;
 }
 export interface VolumeChapterListStepDependencies<Provider extends string, Document extends ChapterListWorkspace> {
   inputProvider: (context: StepContext) => Promise<VolumeChapterListStepInput<Provider, Document>>;
   volumeService: {
     generateVolumes(novelId: string, options: {
       scope: "chapter_list"; generationMode: "full_volume"; targetVolumeId: string; draftWorkspace: Document;
-      provider?: Provider; model?: string; temperature?: number; guidance?: string;
+      provider?: Provider; model?: string; temperature?: number; guidance?: string; estimatedChapterCount?: number;
       taskId: string; entrypoint: "director_next"; persistIntermediateDocuments: false;
+      onChapterTitleDiversityDebt?: (event: {volumeId: string; issue: string; chapterOrder: number}) => void;
     }): Promise<Document>;
     updateVolumesWithOptions(novelId: string, document: Document, options: {
       emitEvent: false; syncPayoffLedger: false; syncToChapterExecution: false;
@@ -54,11 +56,19 @@ export function createVolumeChapterListStepHandler<Provider extends string, Docu
     if (!input.workspace.beatSheets.some(sheet => sheet.volumeId === input.targetVolumeId && sheet.beats.length > 0)) {
       throw new Error("目标卷缺少节奏板，不能生成章节列表。");
     }
+    const titleDiversityDebts: {chapterOrder: number; code: string; action: string}[] = [];
     const generated = await dependencies.volumeService.generateVolumes(novelId, {
       scope: "chapter_list", generationMode: "full_volume", targetVolumeId: input.targetVolumeId,
       draftWorkspace: input.workspace, provider: input.provider, model: input.model,
-      temperature: input.temperature, guidance: input.guidance,
+      temperature: input.temperature, guidance: input.guidance, estimatedChapterCount: input.estimatedChapterCount,
       taskId: context.runId, entrypoint: "director_next", persistIntermediateDocuments: false,
+      onChapterTitleDiversityDebt: event => {
+        titleDiversityDebts.push({
+          chapterOrder: event.chapterOrder,
+          code: "CHAPTER_TITLE_DIVERSITY",
+          action: "continue_with_warning",
+        });
+      },
     });
     requireCompleteList(generated, novelId, input.targetVolumeId);
     const saved = await dependencies.volumeService.updateVolumesWithOptions(novelId, generated, {
@@ -73,6 +83,6 @@ export function createVolumeChapterListStepHandler<Provider extends string, Docu
       scope: context.contract.scope, status: "draft", protectedUserContent: false,
       contentRef: `volume_chapter_list:${novelId}:${input.targetVolumeId}`,
       contentHash: dependencies.contentHash(chapters),
-    }};
+    }, ...(titleDiversityDebts.length > 0 ? {debts: titleDiversityDebts} : {})};
   };
 }
