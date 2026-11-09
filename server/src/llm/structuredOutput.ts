@@ -2,11 +2,12 @@ import type { StructuredResponseEvidence } from "@ai-novel/shared/types/structur
 import { toJSONSchema, type ZodType } from "zod";
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
 import type { ModelRouteRequestProtocol } from "@ai-novel/shared/types/novel";
-import { isBuiltInProvider } from "./providers";
+import { resolveCapability, storedCapability, type StructuredMode } from "./compatibility";
+import { getProviderDefaultBaseUrl, isBuiltInProvider } from "./providers";
 import { isDeepSeekThinkingModeProvider, isGlmThinkingModeProvider } from "./reasoning";
 
 export type StructuredExecutionMode = "plain" | "structured";
-export type StructuredOutputStrategy = "json_schema" | "json_object" | "prompt_json";
+export type StructuredOutputStrategy = "json_schema" | "json_object" | "tool_calling" | "prompt_json";
 export type StructuredOutputErrorCategory =
   | "unsupported_native_json"
   | "thinking_pollution"
@@ -16,6 +17,8 @@ export type StructuredOutputErrorCategory =
   | "transport_error";
 
 export interface StructuredOutputProfile {
+  structuredModes?: StructuredMode[];
+  failedModes?: StructuredMode[];
   nativeJsonSchema: boolean;
   nativeJsonObject: boolean;
   requiresNonThinkingForStructured: boolean;
@@ -141,7 +144,7 @@ function buildProfile(input: Partial<StructuredOutputProfile> & { family: string
   };
 }
 
-export function resolveStructuredOutputProfile(input: {
+function resolveBuiltinStructuredOutputProfile(input: {
   provider: LLMProvider;
   model?: string;
   baseURL?: string;
@@ -300,6 +303,39 @@ export function resolveStructuredOutputProfile(input: {
   });
 }
 
+export function resolveStructuredOutputProfile(input: Parameters<typeof resolveBuiltinStructuredOutputProfile>[0]): StructuredOutputProfile {
+  const builtin = resolveBuiltinStructuredOutputProfile(input);
+  const capability = resolveCapability(input);
+  const stored = storedCapability(input);
+  const customEndpoint = !isBuiltInProvider(input.provider)
+    || Boolean(input.baseURL && extractHost(input.baseURL) !== extractHost(getProviderDefaultBaseUrl(input.provider)));
+  const modes = stored?.structuredModes ?? (capability.family === "spark" ? ["prompt_only" as const] : [
+    ...(builtin.nativeJsonSchema ? ["json_schema" as const] : []),
+    ...(builtin.nativeJsonObject ? ["json_object" as const] : []),
+    ...(builtin.nativeJsonSchema || builtin.nativeJsonObject ? ["tool_calling" as const] : []),
+    "prompt_only" as const,
+  ]);
+  const available = modes.filter((mode) => !capability.failedModes.includes(mode));
+  return { ...builtin, structuredModes: modes, failedModes: capability.failedModes,
+    nativeJsonSchema: available.includes("json_schema"), nativeJsonObject: available.includes("json_object"),
+    preferredStructuredStrategy: available[0] === "prompt_only" || !available[0] ? "prompt_json" : available[0],
+    supportsReasoningToggle: capability.thinkingToggle.supported,
+    // Unknown gateways must not inherit request-level thinking-on defaults.
+    // A saved probe or override remains authoritative about usable controls.
+    requiresNonThinkingForStructured: stored ? capability.thinkingToggle.supported : customEndpoint || builtin.requiresNonThinkingForStructured,
+  };
+}
+
+export function structuredStrategySequence<T>(profile: StructuredOutputProfile, schema: ZodType<T>): StructuredOutputStrategy[] {
+  if (schemaAllowsTopLevelArray(schema)) return ["prompt_json"];
+  const modes = profile.structuredModes ?? [
+    ...(profile.nativeJsonSchema ? ["json_schema" as const] : []),
+    ...(profile.nativeJsonObject ? ["json_object" as const] : []),
+    "prompt_only" as const,
+  ];
+  return [...new Set([...modes.filter((mode) => !profile.failedModes?.includes(mode)).map((mode) => mode === "prompt_only" ? "prompt_json" as const : mode), "prompt_json" as const])];
+}
+
 export function schemaAllowsTopLevelArray<T>(schema: ZodType<T>): boolean {
   const probe = schema.safeParse([]);
   if (probe.success) {
@@ -312,6 +348,7 @@ export function selectStructuredOutputStrategy<T>(
   profile: StructuredOutputProfile,
   schema: ZodType<T>,
 ): StructuredOutputStrategy {
+  if (profile.structuredModes) return structuredStrategySequence(profile, schema)[0];
   if (schemaAllowsTopLevelArray(schema)) {
     return "prompt_json";
   }
@@ -346,11 +383,27 @@ export function buildStructuredResponseFormat<T>(input: {
       json_schema: {
         name: sanitizeSchemaName(input.label),
         strict: true,
-        schema: toJSONSchema(input.schema),
+        schema: toJSONSchema(input.schema, { unrepresentable: "any" }),
       },
     };
   }
   return undefined;
+}
+
+/** The preflight and physical invocation must describe the same protocol payload. */
+export function buildStructuredCallOptions<T>(input: {
+  strategy: StructuredOutputStrategy;
+  schema: ZodType<T>;
+  label: string;
+}): Record<string, unknown> {
+  const responseFormat = buildStructuredResponseFormat(input);
+  if (responseFormat) return { response_format: responseFormat };
+  if (input.strategy === "tool_calling") return {
+    tools: [{ type: "function", function: { name: "structured_output", description: "Return the requested structured result",
+      parameters: toJSONSchema(input.schema, { unrepresentable: "any" }) } }],
+    tool_choice: { type: "function", function: { name: "structured_output" } },
+  };
+  return {};
 }
 
 export function classifyStructuredOutputFailure(input: {

@@ -1,3 +1,6 @@
+import { registerInvocationHistoryRoutes } from "./settings/invocationHistoryRoutes";
+import { registerModelCompatibilityRoutes } from "../llm/compatibility/http";
+import { probeIfEnabled } from "../llm/compatibility/probing";
 import { Router } from "express";
 import type { ApiResponse } from "@ai-novel/shared/types/api";
 import {
@@ -351,6 +354,8 @@ function buildCustomProviderStatus(item: {
 
 router.use(authMiddleware);
 registerCustomProviderRoutes(router);
+registerModelCompatibilityRoutes(router);
+registerInvocationHistoryRoutes(router);
 registerLLMSelectionRoutes(router);
 registerChapterBudgetSettingsRoutes(router);
 
@@ -716,6 +721,7 @@ router.put(
         requestIntervalMs: data.requestIntervalMs ?? 0,
       } : null);
       evictSharedLimiters(provider);
+      if (body.model !== undefined || body.baseURL !== undefined || body.key !== undefined) void probeIfEnabled({ provider, model: data.model ?? undefined, baseURL: data.baseURL ?? undefined }).catch(() => undefined);
 
       const hiddenModels = parseHiddenModels(data.hiddenModels);
       let availableModels = Array.from(new Set([

@@ -35,7 +35,7 @@ test("deepseek v4 pro behavior maps reasoning toggle to thinking mode", () => {
   assert.deepEqual(disabled.modelKwargs, { thinking: { type: "disabled" } });
 
   const enabled = resolveProviderReasoningBehavior({
-    provider: "custom_gateway",
+    provider: "deepseek",
     baseURL: "https://api.deepseek.com/v1",
     model: "deepseek-reasoner",
     reasoningEnabled: true,
@@ -55,7 +55,7 @@ test("deepseek thinking mode detection is limited to toggle-capable models", () 
   assert.equal(isDeepSeekThinkingModeProvider("deepseek", undefined, "deepseek-pro"), true);
   assert.equal(isDeepSeekThinkingModeProvider("deepseek", undefined, "deepseek-v4-pro"), true);
   assert.equal(isDeepSeekThinkingModeProvider("deepseek", undefined, "deepseek-v4-flash"), true);
-  assert.equal(isDeepSeekThinkingModeProvider("custom_gateway", "https://api.deepseek.com/v1", "deepseek-reasoner"), true);
+  assert.equal(isDeepSeekThinkingModeProvider("custom_gateway", "https://api.deepseek.com/v1", "deepseek-reasoner"), false);
   assert.equal(isDeepSeekThinkingModeProvider("deepseek", undefined, "deepseek-chat"), false);
   assert.equal(isDeepSeekThinkingModeProvider("openai", "https://api.openai.com/v1", "deepseek-v4-pro"), false);
   assert.equal(
@@ -64,8 +64,86 @@ test("deepseek thinking mode detection is limited to toggle-capable models", () 
       "https://ooioo.work/v1",
       "deepseek-v4-flash-0731-fast",
     ),
-    true,
+    false,
   );
+});
+
+test("deepseek thinking mode recognizes versioned models and vendor prefixes", () => {
+  const models = [
+    "deepseek-reasoner",
+    "deepseek-flash",
+    "deepseek-flash-fast",
+    "deepseek-pro",
+    "deepseek-pro-preview",
+    "deepseek-v4-flash",
+    "deepseek-v4-pro",
+    "deepseek-v4.1-flash",
+    "deepseek-v4.1-pro",
+    "deepseek-v4.12-flash-0731-fast",
+    "deepseek-v4.123-pro_preview",
+    "deepseek-v4.0-flash.preview",
+    "deepseek-v4.10-pro:latest",
+  ];
+
+  for (const model of models) {
+    for (const name of [model, `vendor/${model}`, ` Vendor/${model.toUpperCase()} `]) {
+      assert.equal(isDeepSeekThinkingModeProvider("deepseek", undefined, name), true, name);
+      assert.equal(isDeepSeekThinkingModeProvider("custom_gateway", "https://gateway.invalid/v1", name), false, name);
+      assert.equal(isDeepSeekThinkingModeProvider("openai", "https://api.openai.com/v1", name), false, name);
+    }
+  }
+});
+
+test("deepseek thinking mode rejects unrelated versions and malformed model boundaries", () => {
+  const models = [
+    "deepseek-chat",
+    "deepseek-v3",
+    "deepseek-v3-flash",
+    "deepseek-v4x-flash",
+    "deepseek-v40-flash",
+    "deepseek-v5-flash",
+    "deepseek-v4.-flash",
+    "deepseek-v4.x-pro",
+    "deepseek-v4.1.2-flash",
+    "deepseek-v4-flashy",
+    "deepseek-v4.1-professional",
+    "deepseek-v4.1",
+    "other-deepseek-v4.1-flash",
+    "",
+    undefined,
+  ];
+
+  for (const model of models) {
+    const names = model ? [model, `vendor/${model}`] : [model];
+    for (const name of names) {
+      assert.equal(isDeepSeekThinkingModeProvider("deepseek", undefined, name), false, name);
+      assert.equal(isDeepSeekThinkingModeProvider("custom_gateway", "https://gateway.invalid/v1", name), false, name);
+    }
+  }
+});
+
+test("custom gateway does not infer thinking controls from deepseek model names", () => {
+  for (const model of ["deepseek-v4.1-flash", "vendor/deepseek-v4.1-flash"]) {
+    const disabled = resolveProviderReasoningBehavior({
+      provider: "custom_gateway",
+      baseURL: "https://gateway.invalid/v1",
+      model,
+      reasoningEnabled: false,
+      reasoningEffort: "max",
+    });
+
+    assert.equal(disabled.reasoningEnabled, false);
+    assert.equal(disabled.reasoningEffort, null);
+    assert.equal(disabled.modelKwargs, undefined);
+    const enabled = resolveProviderReasoningBehavior({
+      provider: "custom_gateway",
+      baseURL: "https://gateway.invalid/v1",
+      model,
+      reasoningEnabled: true,
+    });
+    assert.equal(enabled.modelKwargs, undefined);
+    assert.equal(enabled.reasoningEffort, null);
+  }
 });
 
 test("deepseek v4 flash can disable thinking for structured generation", () => {

@@ -63,8 +63,10 @@ import {
 import { useNovelAutoDirectorCandidateMutations } from "../components/useNovelAutoDirectorCandidateMutations";
 import { hasCreationFoundationChanged } from "./creationFoundationPickerState";
 import type { AutoDirectorCreateDraft } from "./draft/autoDirectorCreateDraft";
+import { getDirectionGenerationDisabledReasons } from "./domain/generationReadiness";
 import type { CreativeCarryoverContract } from "@ai-novel/shared/types/creativeCarryoverContract";
 import { parseCreativeCarryoverContract } from "@ai-novel/shared/types/creativeCarryoverContract";
+import { usesOpeningRetry } from "./recovery";
 
 interface UseAutoDirectorCreateControllerInput {
   marketBriefId?: string;
@@ -143,10 +145,10 @@ export function useAutoDirectorCreateController(input: UseAutoDirectorCreateCont
       setDirectorVersion(versionsQuery.data.defaultVersion);
     }
   }, [workflowTaskId, versionsQuery.data, directorVersion]);
-  const [worldSetupMode, setWorldSetupMode] = useState<DirectorWorldSetupMode>("auto_generate");
+  const [worldSetupMode, setWorldSetupMode] = useState<DirectorWorldSetupMode>(initialDraft?.worldSetupMode ?? "auto_generate");
   const [autoExecutionDraft, setAutoExecutionDraft] = useState(() => createDefaultDirectorAutoExecutionDraftState());
   const [selectedStyleProfileId, setSelectedStyleProfileId] = useState(
-    initialStyleProfileId || initialDraft?.selectedStyleProfileId || "",
+    initialDraft?.selectedStyleProfileId ?? initialStyleProfileId ?? "",
   );
   const [ideaInspirations, setIdeaInspirations] = useState<DirectorIdeaInspiration[]>([]);
   const [ideaConstellationOptions, setIdeaConstellationOptions] = useState<DirectorIdeaConstellationOption[]>([]);
@@ -158,13 +160,15 @@ export function useAutoDirectorCreateController(input: UseAutoDirectorCreateCont
     queryFn: getAutoDirectorIssuePolicy,
     retry: false,
   });
-  const [issuePolicy, setIssuePolicy] = useState<DirectorIssuePolicy | null>(null);
+  const [issuePolicy, setIssuePolicy] = useState<DirectorIssuePolicy | null>(initialDraft?.issuePolicy ?? null);
   const confirmSubmitLockedRef = useRef(false);
   const autoApprovalDraft = useDirectorAutoApprovalDraft(true);
   const { applySnapshot: applyAutoApprovalSnapshot } = autoApprovalDraft;
 
   useEffect(() => {
-    if (issuePolicyQuery.data?.data) setIssuePolicy(issuePolicyQuery.data.data);
+    if (issuePolicyQuery.data?.data) {
+      setIssuePolicy((current) => current ?? issuePolicyQuery.data.data ?? null);
+    }
   }, [issuePolicyQuery.data?.data]);
 
   useEffect(() => {
@@ -175,10 +179,10 @@ export function useAutoDirectorCreateController(input: UseAutoDirectorCreateCont
   }, [workflowTaskId, workflowTaskIdProp]);
 
   useEffect(() => {
-    if (initialStyleProfileId) {
+    if (initialStyleProfileId && !initialDraft) {
       setSelectedStyleProfileId((current) => current || initialStyleProfileId);
     }
-  }, [initialStyleProfileId]);
+  }, [initialDraft, initialStyleProfileId]);
 
   useEffect(() => {
     if (!restoredTask) {
@@ -209,11 +213,14 @@ export function useAutoDirectorCreateController(input: UseAutoDirectorCreateCont
     if (typeof seedPayload?.styleProfileId === "string") {
       setSelectedStyleProfileId(seedPayload.styleProfileId);
     }
+    if (seedPayload?.issuePolicy) {
+      setIssuePolicy(seedPayload.issuePolicy);
+    }
     const restoredContract = parseCreativeCarryoverContract(seedPayload?.creativeCarryoverContract);
     if (restoredContract) {
       onCreativeCarryoverContractChange?.(restoredContract);
     }
-    setWorldSetupMode("auto_generate");
+    setWorldSetupMode(seedPayload?.worldSetupMode ?? "auto_generate");
   }, [applyAutoApprovalSnapshot, onCreativeCarryoverContractChange, restoredTask, workflowTaskId]);
 
   const directorBasicForm = useMemo(
@@ -553,10 +560,7 @@ export function useAutoDirectorCreateController(input: UseAutoDirectorCreateCont
       if (!taskId) {
         throw new Error("当前没有可继续的自动导演任务。");
       }
-      if (!directorTask?.resumeTarget?.novelId) {
-        try { return await retryOriginalDirectorOpening(taskId); }
-        catch(error) { if ((error as {status?:number}).status !== 404) throw error; }
-      }
+      if (usesOpeningRetry(directorTask, directorVersion)) return retryOriginalDirectorOpening(taskId);
       return continueNovelWorkflow(taskId, { continuationMode: "resume" });
     },
     onSuccess: async (response) => {
@@ -599,10 +603,17 @@ export function useAutoDirectorCreateController(input: UseAutoDirectorCreateCont
     setBatches((prev) => applyDirectorCandidateTitleOption(prev, batchId, candidateId, option));
   };
 
-  const canGenerate = idea.trim().length > 0
-    && Boolean(versionsQuery.data?.availableVersions.includes(directorVersion))
-    && !generateMutation.isPending
-    && (!requireCreativeCarryoverAdopted || Boolean(creativeCarryoverContract?.adopted));
+  const generationDisabledReasons = getDirectionGenerationDisabledReasons({
+    idea,
+    directorVersion,
+    availableVersions: versionsQuery.data?.availableVersions ?? [],
+    versionsLoading: versionsQuery.isPending,
+    versionsError: versionsQuery.isError,
+    isGenerating: generateMutation.isPending,
+    requireCreativeCarryoverAdopted,
+    creativeCarryoverAdopted: Boolean(creativeCarryoverContract?.adopted),
+  });
+  const canGenerate = generationDisabledReasons.length === 0;
 
   const updateProductionFoundation = async (patch: Partial<{
     genreId: string;
@@ -757,6 +768,9 @@ export function useAutoDirectorCreateController(input: UseAutoDirectorCreateCont
     setIssuePolicy,
     updateProductionFoundation,
     canGenerate,
+    generationDisabledReasons,
+    retryDirectorVersions: () => void versionsQuery.refetch(),
+    directorVersionsError: versionsQuery.isError,
     generateMutation,
     patchCandidateMutation,
     refineTitleMutation,
