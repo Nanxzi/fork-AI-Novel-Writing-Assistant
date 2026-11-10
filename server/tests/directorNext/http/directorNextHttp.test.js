@@ -52,6 +52,18 @@ test('resume accepts an explicit scoped budget grant and rejects invalid or weig
  });
 });
 
+test('source-page pause carries the saved control version and idempotency key', async () => {
+  const received = [];
+  await withServer(deps({ commandService: { execute: async command => { received.push(command); return {runId: command.runId, controlVersion: 3}; } } }), async base => {
+    const body = {type: 'pause', runId: 'run-1', expectedVersion: 2, idempotencyKey: 'user-pause'};
+    const post = value => fetch(base + '/api/director-next/commands', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(value)});
+    assert.equal((await post(body)).status, 202);
+    assert.deepEqual(received, [body]);
+    assert.equal((await post({...body, expectedVersion: -1})).status, 400);
+    assert.equal(received.length, 1);
+  });
+});
+
 test('a remaining-chapters grant preserves its explicit boolean scope over HTTP',async()=>{
  const received=[];
  await withServer(deps({commandService:{execute:async command=>{received.push(command);return {runId:command.runId,controlVersion:3};}}}),async base=>{
@@ -359,4 +371,19 @@ test('a completely unreadable history is explicit and never represented as an em
   const body=await response.json();assert.equal(body.success,false);assert.equal(body.warnings.length,1);
   assert.equal(body.code,'director_projection_unavailable');assert.ok(!JSON.stringify(body).includes('private SQL'));
  });
+});
+
+
+test('launch schema retains optional fixed volume count and rejects values outside 1-24',async()=>{
+ const seen=[];
+ await withServer(deps({commandService:{execute:async command=>{seen.push(command);return {runId:'run'};}}}),async base=>{
+  for (const count of [undefined,1,24,0,25,1.5]) {
+   const response=await fetch(`${base}/api/director-next/commands`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+    type:'open_run',novelId:'novel',driver:'auto',stepIdsInScope:null,idempotencyKey:`count-${count}`,
+    launchInput:{storyInput:'story',estimatedChapterCount:80,worldMode:'skip',targetMode:'opening',userPreferredVolumeCount:count},
+   })});
+   assert.equal(response.status,count===undefined || count===1 || count===24 ? 202 : 400);
+  }
+ });
+ assert.deepEqual(seen.map(command=>command.launchInput.userPreferredVolumeCount),[undefined,1,24]);
 });

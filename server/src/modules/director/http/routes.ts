@@ -41,6 +41,7 @@ const commandBodySchema = z.discriminatedUnion("type", [
     launchInput: z.object({
       storyInput: nonEmpty,
       estimatedChapterCount: z.number().int().positive(),
+      userPreferredVolumeCount: z.number().int().min(1).max(24).optional(),
       chapterTokenLimit: directorChapterTokenLimitSchema.optional(),
       temperature: z.number().min(0).max(2).optional(),
       worldMode: z.enum(["generate", "reuse", "skip"]),
@@ -65,6 +66,7 @@ const commandBodySchema = z.discriminatedUnion("type", [
   }),
   z.object({ type: z.literal("resume"), runId: nonEmpty, expectedVersion, idempotencyKey: nonEmpty, chapterBudget: directorChapterBudgetGrantSchema.optional(), resolveUnknownClaims: directorUnknownClaimResolutionSchema.optional() }),
   z.object({type: z.literal("retry_start"), runId: nonEmpty, expectedVersion, idempotencyKey: nonEmpty}),
+  z.object({type: z.literal("pause"), runId: nonEmpty, expectedVersion, idempotencyKey: nonEmpty}),
   z.object({
     type: z.literal("handoff"),
     runId: nonEmpty,
