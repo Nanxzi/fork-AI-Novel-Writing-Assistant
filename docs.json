@@ -1,0 +1,22 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "Biz Novel Studio",
+  "description": "AI 小说创作工作台官方文档：从一句灵感，走向一本完整小说",
+  "colors": {
+    "primary": "#16A34A"
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "文档",
+        "pages": ["introduction", "quickstart", "installation", "model-configuration"]
+      }
+    ]
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/ExplosiveCoderflome/AI-Novel-Writing-Assistant"
+    }
+  }
+}
