@@ -10,6 +10,7 @@
 <p align="center">
   <a href="https://github.com/ExplosiveCoderflome/AI-Novel-Writing-Assistant/releases/latest"><img src="https://img.shields.io/github/v/release/ExplosiveCoderflome/AI-Novel-Writing-Assistant?style=flat-square&amp;label=Windows%20%E6%A1%8C%E9%9D%A2%E7%89%88&amp;color=17556b" alt="最新桌面版本" /></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-17556b?style=flat-square" alt="AGPL-3.0 许可证" /></a>
+  <a href="https://linux.do/"><img src="https://img.shields.io/badge/LINUX%20DO-%E7%A4%BE%E5%8C%BA-FDD835?style=flat-square&amp;labelColor=222" alt="LINUX DO 社区" /></a>
   <a href="./package.json"><img src="https://img.shields.io/badge/Monorepo-pnpm%20workspace-3C873A?style=flat-square" alt="Monorepo · pnpm workspace" /></a>
 </p>
 
@@ -49,27 +50,15 @@
 
 ## 最新更新
 
-### 2026-11-11 · v0.7.5
+### 2026-11-13 · v0.8.1
 
-桌面版本 `v0.7.5` 新增任务记录删除与运行中任务停止，补发 Mac 安装包（Intel 与 Apple Silicon），并加快测试与发布检查。
-
-#### 新增
-
-- 运行记录、导演推进和拆书分析支持逐条确认删除已结束记录，保留已保存的小说、章节、分析内容与来源资料。
-- 导演推进、拆书分析、写法提取及封面和角色图片生成可直接停止运行中的任务；排队或运行中的记录会提示先停止再删除。
+桌面版本 `v0.8.1` 修复新书空白占位卷被误判为用户固定单卷导致长篇小说无法生成多卷的问题。
 
 #### 修复
 
-- 修复 Mac 平台上质量隔离测试因临时目录符号链接路径不一致而失败，导致 v0.7.3、v0.7.4 未能产出 Mac 安装包的问题；本版本起提供 Intel 与 Apple Silicon 的 Mac 安装包。
+- 新书的初始空白占位卷（`legacy-volume-1`，内容为「待补全」）不再被当作用户确认的单卷规划，200 章目标小说可以正常建议并生成多卷结构，避免被固定为单卷。
 
-#### 优化
-
-- 测试按批次复用进程，减少逐文件启动开销，默认开发测试只运行 fast 分组，集成测试单独运行。
-- 发布前检查会复用同一提交已通过的测试记录，避免重复运行完整测试；提交变化或工作区有改动时仍会重新运行，也可用 `--force-tests` 强制重跑。
-
-完整历史更新见 [版本更新说明](./docs/releases/release-notes.md)。
-
----
+[查看完整更新历史](docs/releases/release-notes.md)
 
 ## 现在已经能做什么
 
@@ -489,6 +478,18 @@ V2 内核位于 `server/src/modules/director/`，业务能力由应用层接入�
 
 提交贡献前请阅读 [CONTRIBUTING.md](./CONTRIBUTING.md) 与 [CLA.md](./CLA.md)，并说明第三方代码、素材及其许可证。感谢参与测试、提出建议和提交修复的朋友，也感谢贡献者 [@ystyleb](https://github.com/ystyleb)。
 
+### 友情链接
+
+<p align="center">
+  <a href="https://linux.do/"><img src="https://img.shields.io/badge/LINUX%20DO-%E7%A4%BE%E5%8C%BA-FDD835?style=flat-square&amp;labelColor=222" alt="LINUX DO 社区" /></a>
+</p>
+
+<p align="center">
+  <a href="https://linux.do/"><strong>LINUX DO</strong></a>
+  ·
+  <a href="https://linux.do/t/topic/2738271">本项目讨论帖</a>
+</p>
+
 ### 交流与支持
 
 <details>
@@ -514,4 +515,4 @@ V2 内核位于 `server/src/modules/director/`，业务能力由应用层接入�
 - 服务型商用：将本项目或其修改版本作为后端，以 SaaS、托管等形式向第三方提供服务，须通过作者获取商业授权许可。
 - 新贡献默认按 [CLA.md](./CLA.md) 提交，可随项目按 AGPL-3.0-only 分发，也可纳入维护者另行提供的商业授权。
 
-[贡献与授权说明](./CONTRIBUTING.md) · [LINUX DO](https://linux.do/)
+[贡献与授权说明](./CONTRIBUTING.md)
