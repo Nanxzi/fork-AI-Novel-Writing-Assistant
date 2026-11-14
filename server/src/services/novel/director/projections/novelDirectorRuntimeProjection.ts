@@ -7,6 +7,7 @@ import type {
   DirectorRuntimeSnapshot,
 } from "@ai-novel/shared/types/directorRuntime";
 import { prisma } from "../../../../db/prisma";
+import { readLegacyDirectorRuntime } from "../infrastructure/legacyRuntime";
 import { buildDefaultDirectorPolicy } from "../runtime/directorRuntimeDefaults";
 import { DirectorEventProjectionService, parseDirectorIssueEventMetadata } from "../runtime/DirectorEventProjectionService";
 import { directorUsageTelemetryQueryService } from "../runtime/DirectorUsageTelemetryQueryService";
@@ -38,15 +39,6 @@ function parseRiskHistory(rows: Array<{
     const parsed = parsePersistedDirectorRiskAssessment(metadata?.riskAssessment);
     return parsed ? [{ ...parsed, eventId: row.id }] : [];
   });
-}
-
-function isDirectorRuntimeTableUnavailable(error: unknown): boolean {
-  return Boolean(
-    error
-      && typeof error === "object"
-      && "code" in error
-      && ((error as { code?: unknown }).code === "P2021" || (error as { code?: unknown }).code === "P2022"),
-  );
 }
 
 type ActiveRuntimeCommand = {
@@ -496,68 +488,7 @@ export async function loadPersistentDirectorRuntimeProjection(
         updatedAt: true,
       },
     }) as Promise<ActiveRuntimeCommand | null>,
-    prisma.directorRuntimeInstance.findFirst({
-      where: { workflowTaskId: taskId },
-      orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
-      select: {
-        id: true,
-        novelId: true,
-        runId: true,
-        status: true,
-        currentStep: true,
-        checkpointVersion: true,
-        workerMessage: true,
-        lastErrorMessage: true,
-        lastHeartbeatAt: true,
-        updatedAt: true,
-        executions: {
-          where: { status: { in: ["leased", "running"] } },
-          orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
-          take: 1,
-          select: {
-            id: true,
-            stepType: true,
-            resourceClass: true,
-            workerId: true,
-            slotId: true,
-            status: true,
-            startedAt: true,
-            leaseExpiresAt: true,
-            errorMessage: true,
-          },
-        },
-        checkpoints: {
-          orderBy: [{ version: "desc" }, { createdAt: "desc" }],
-          take: 1,
-          select: {
-            summary: true,
-            createdAt: true,
-          },
-        },
-        commands: {
-          orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
-          take: 20,
-          select: {
-            id: true,
-            commandType: true,
-            status: true,
-            leaseOwner: true,
-            leaseExpiresAt: true,
-            errorMessage: true,
-            runAfter: true,
-            startedAt: true,
-            finishedAt: true,
-            createdAt: true,
-            updatedAt: true,
-          },
-        },
-      },
-    }).catch((error) => {
-      if (isDirectorRuntimeTableUnavailable(error)) {
-        return null;
-      }
-      throw error;
-    }) as Promise<RuntimeInstanceProjectionRow | null>,
+    readLegacyDirectorRuntime(prisma, taskId),
     prisma.novelWorkflowTask.findUnique({
       where: { id: taskId },
       select: { status: true },
@@ -583,9 +514,7 @@ export async function loadPersistentDirectorRuntimeProjection(
     : false;
 
   if (!run) {
-    if (!runtime) {
-      return null;
-    }
+    if (!runtime) return null;
     const chapterExecutionProgress = runtime.novelId
       ? await new ChapterExecutionProgressInspector().inspectNovel(runtime.novelId).catch(() => null)
       : null;
@@ -650,12 +579,11 @@ export async function loadPersistentDirectorRuntimeProjection(
     snapshot.steps,
   );
   const commandToOverlay = isTaskTerminal ? null : activeCommand;
-  const runtimeToOverlay = isTaskTerminal ? null : runtime;
   const chapterExecutionProgress = run.novelId
     ? await new ChapterExecutionProgressInspector().inspectNovel(run.novelId).catch(() => null)
     : null;
   return {
-    ...overlayRuntimeInstance(overlayActiveCommand(projection, commandToOverlay), runtimeToOverlay),
+    ...overlayRuntimeInstance(overlayActiveCommand(projection, commandToOverlay), isTaskTerminal ? null : runtime),
     startupPreparation,
     latestRiskAssessment,
     riskHistory,

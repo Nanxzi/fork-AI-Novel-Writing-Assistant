@@ -5,6 +5,8 @@ const path = require("node:path");
 
 const serverRoot = path.resolve(__dirname, "..");
 const testsRoot = path.join(serverRoot, "tests");
+// Live services have an explicit catalog and never enter the portable suites.
+const pgLiveTests = new Set(["pgCloudAcceptance.harness.test.js"]);
 
 const integrationTests = new Set([
   "directorLegacyPauseSqlite.test.js",
@@ -87,7 +89,13 @@ function listTestFiles(directory) {
 }
 
 function selectTestFiles(mode) {
-  const allFiles = listTestFiles(testsRoot);
+  const discovered = listTestFiles(testsRoot);
+  if (mode === "pg-live") {
+    const files = discovered.filter(file => pgLiveTests.has(path.basename(file)));
+    if (files.length !== pgLiveTests.size) throw new Error("PG live catalog is incomplete");
+    return files;
+  }
+  const allFiles = discovered.filter(file => !pgLiveTests.has(path.basename(file)));
   if (mode === "integration") {
     return allFiles.filter((file) => integrationTests.has(path.basename(file)));
   }
@@ -142,9 +150,24 @@ function selectFastGroups(files) {
   return groups;
 }
 
+function runTestGroup(group, mode = "fast") {
+  return spawnSync(process.execPath, [
+    "--test",
+    ...(mode === "pg-live" ? ["--test-timeout=120000"] : [
+      "--require", path.join(__dirname, "testing/sqlite-preload.cjs"),
+    ]),
+    `--test-isolation=${group.isolation}`,
+    `--test-concurrency=${group.concurrency}`,
+    ...group.files.map((file) => path.relative(serverRoot, file)),
+  ], {
+    cwd: serverRoot,
+    stdio: "inherit",
+  });
+}
+
 function main() {
   const requestedMode = process.argv[2] ?? "fast";
-  if (!new Set(["fast", "integration", "all"]).has(requestedMode)) {
+  if (!new Set(["fast", "integration", "all", "pg-live"]).has(requestedMode)) {
     throw new Error(`Unknown test mode: ${requestedMode}`);
   }
 
@@ -163,15 +186,7 @@ function main() {
   for (const group of groups) {
     // Only reviewed side-effect-free batches share a process. Every other file,
     // including all SQLite scenarios, keeps its own process; integration is capped at two.
-    const result = spawnSync(process.execPath, [
-      "--test",
-      `--test-isolation=${group.isolation}`,
-      `--test-concurrency=${group.concurrency}`,
-      ...group.files.map((file) => path.relative(serverRoot, file)),
-    ], {
-      cwd: serverRoot,
-      stdio: "inherit",
-    });
+    const result = runTestGroup(group, requestedMode);
 
     if (result.error) {
       console.error(`Unable to start tests: ${result.error.message}`);
@@ -181,4 +196,5 @@ function main() {
   return exitCode;
 }
 
-process.exit(main());
+if (require.main === module) process.exit(main());
+module.exports = { selectTestFiles, runTestGroup };

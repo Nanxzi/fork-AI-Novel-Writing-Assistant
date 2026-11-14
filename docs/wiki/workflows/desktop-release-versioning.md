@@ -7,6 +7,8 @@
 ## Current Rule
 
 - `desktop/package.json` 的 `version` 是桌面客户端唯一版本源。
+- `docs/releases/release-notes.md` 是完整更新历史的唯一内容源；应用内说明按当前 package version 读取同版本日期条目。发版说明测试要求版本号有对应条目，版本升级不能只改 package version。
+- 项目仍使用日期作为更新标识；尚未正式发布的版本必须明确标为候选，不能让候选号看起来像可下载版本。
 - 前端网页开发态从 Vite 注入的 `VITE_APP_VERSION` 读取该版本，桌面运行态优先读取 Electron runtime 提供的 `appVersion`。
 - 正式发布 tag 必须是 `vX.Y.Z`，并且 `X.Y.Z` 必须等于 `desktop/package.json` 的 `version`。
 - 不在 UI、README 或发布脚本中硬编码另一个客户端版本号。
@@ -29,6 +31,8 @@
 通过检查不等于长期授权。检查前后读取 HEAD、版本与工作区，期间有代码、版本或提交变化必须重新检查。唯一可复用的本地证据是 `.tmp/desktop-release/<SHA>.json` 中同 SHA、同桌面版本的完整通过记录，且当前工作区必须干净；记录只用于避免 dry-run、实际打 tag 与本地上传之间重复跑同一套检查。实际重跑前（包括使用 `--force-tests`）先清除同 SHA 的旧记录，只在整套检查通过后写入新记录，避免失败后的上传复用过期结果。
 
 正式上传再次核对版本 tag 指向当前 HEAD，且提交属于 main；GitHub 必须提供匹配的 tag ref。不能将旧 SHA 的成功结果、任意环境布尔值、其他分支的验证或不干净工作区当作本次通过证据。
+
+PostgreSQL live gate proof (`.tmp/pg-live-gate.json`) is run-scoped release evidence. `pg-cloud-harness.cjs` invalidates its selected proof path before validating configuration, so an invalid invocation cannot leave a previous pass reusable. Tests and other intentional negative invocations must set `PG_LIVE_PROOF_PATH` to a dedicated temporary file; they must never run against the repository default path, which may contain the real proof downloaded by a release job. The override changes only the cleanup/write target and does not weaken proof validation or the production default.
 
 本地上传还须读取 origin 的已推送 tag（注解 tag 取 peeled commit）并与本次 HEAD 比较，避免发布器在远端缺少 tag 时替旧 main 自动创建发布标识。
 
@@ -57,6 +61,7 @@ Windows 保留 x64 NSIS 和便携包；Mac 通过 macos-latest 的独立 x64/arm
 - 如果界面顶部显示版本和安装包文件名不一致，先检查打包所用 commit 的 `desktop/package.json`，不要在前端组件里补一个临时版本。
 - 如果 GitHub Release tag 已存在，不能复用同一个版本重新上传；应继续 bump 到新的 `X.Y.Z`。
 - 如果发版前只更新 release notes 但没有 bump 桌面版本，自动更新链路会把新包识别成旧版本，必须先修正版本源再发布。
+- 如果应用内没有显示对应更新，先核对完整更新历史是否存在当前版本的日期条目；不要再复制一份独立的应用内说明对象。
 - 如果 GitHub Actions 提示某个 action 仍在使用 Node 20，应优先升级该 action 的 major 版本，而不是重新加入强制运行时环境变量。
 
 ## Related Modules

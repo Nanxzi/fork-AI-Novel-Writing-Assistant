@@ -1,4 +1,5 @@
 import { implicatesStructuredMode, recordFailedMode, runWithInvocationChain, observeInvocationParse } from "./compatibility";
+import { ProductionBudgetExceededError } from "../modules/production/common";
 import { declarePromptCacheBoundary, getPromptCacheBoundary } from "../platform/llm/cache";
 import { toJSONSchema } from "zod";
 import { randomUUID } from "node:crypto";
@@ -170,10 +171,12 @@ async function resolveAttemptTarget(input: {
   requestProtocol?: ModelRouteRequestProtocol;
   structuredStrategy?: StructuredOutputStrategy;
 }): Promise<StructuredAttemptTarget> {
+  // The route preference applies whenever the caller did not pick a strategy
+  // explicitly. An explicit provider/model must not hide it: callers such as
+  // the director always pass the launch identity, and the identity match below
+  // already confines the route to calls targeting the same provider/model.
   const shouldResolveRoutePreference = Boolean(
     input.taskType
-      && input.provider == null
-      && input.model == null
       && input.structuredStrategy == null,
   );
   const route = shouldResolveRoutePreference ? await resolveModel(input.taskType!) : null;
@@ -390,6 +393,16 @@ async function invokeStructuredAttempt<T>(input: {
     return parsed;
   } catch (error) {
     liveSession.fail(error);
+    // A budget refusal raised inside beforeRequest proves no provider dispatch
+    // happened. It must reach the production kernel typed so the run pauses with
+    // the budget grant flow instead of an "unknown claims" pause; classifying it
+    // as a transport error would destroy that signal and burn a transport retry
+    // on a request that can never be dispatched.
+    if (error instanceof ProductionBudgetExceededError) {
+      evidence.durationMs = Date.now() - startedAt;
+      await finishStructuredDiagnostic(diagnosticId, "failed", evidence);
+      throw error;
+    }
     const category = error instanceof StructuredOutputError
       ? error.category
       : classifyStructuredOutputFailure({ error });
@@ -478,6 +491,9 @@ async function tryStructuredStrategies<T>(input: {
         fallbackUsed: input.fallbackUsed,
       }), value => value.data);
     } catch (error) {
+      // Keep a typed budget refusal typed: strategy fallback and transport
+      // retries must never run against a request the budget refused to dispatch.
+      if (error instanceof ProductionBudgetExceededError) throw error;
       lastError = wrapStructuredInvokeError({
         label: input.baseInput.label,
         error,
@@ -655,6 +671,13 @@ export function summarizeStructuredOutputFailure(input: {
     ? input.error.category
     : extractStructuredOutputErrorCategory(message) ?? classifyStructuredOutputFailure({ error: input.error });
   const suffix = input.fallbackAvailable ? "，可考虑启用结构化备用模型。" : "。";
+  const profile = input.error instanceof StructuredOutputError ? input.error.diagnostics.profile : null;
+  // When the system knows no thinking toggle for this endpoint (typically an
+  // unprobed custom provider), "turn off deep thinking" is not an action the
+  // user can take: the probe is what teaches the system the toggle.
+  const reasoningExhaustedSummary = profile?.requiresNonThinkingForStructured && !profile.supportsReasoningToggle
+    ? "模型只返回了思考内容，输出 Token 已在生成正文前耗尽；系统尚不知道如何关闭该模型的深度思考。如该模型从未做过兼容探测，请先在模型设置里完成一次探测；若已探测仍出现此问题，请提高输出 Token 上限或更换模型。"
+    : "模型只返回了思考内容，输出 Token 已在生成正文前耗尽；请关闭深度思考或提高输出 Token 上限。";
   const incompleteJsonSummary = input.fallbackAvailable
     ? "模型输出的 JSON 被截断或不完整，可能是输出被截断或 token 上限不足；建议先重试，必要时切换更强模型或启用结构化备用模型。"
     : "模型输出的 JSON 被截断或不完整，可能是输出被截断或 token 上限不足；建议先重试，必要时切换更强模型。";
@@ -665,8 +688,9 @@ export function summarizeStructuredOutputFailure(input: {
     malformed_json: `模型输出的 JSON 格式不稳定${suffix}`,
     schema_mismatch: `模型输出未满足目标结构要求${suffix}`,
     empty_response: "模型返回了空内容，没有收到可用正文；请重试，持续出现时检查渠道兼容性、思考设置或更换模型。",
-    reasoning_budget_exhausted: "模型只返回了思考内容，输出 Token 已在生成正文前耗尽；请关闭深度思考或提高输出 Token 上限。",
+    reasoning_budget_exhausted: reasoningExhaustedSummary,
     output_budget_exhausted: "模型输出达到 Token 上限后被截断，结果不完整；请提高输出 Token 上限后重试。",
+    model_unavailable: "模型余额或可用额度不足；请检查账户额度，或更换可用的模型渠道后重试。",
     transport_error: `结构化调用过程发生传输或服务端错误${suffix}`,
   };
   return {
