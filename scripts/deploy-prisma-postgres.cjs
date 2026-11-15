@@ -212,13 +212,28 @@ function prismaEnv(databaseUrl) {
 }
 
 function runPrisma(databaseUrl, args, options = {}) {
-  const result = spawnSync("pnpm", ["exec", "prisma", ...args], {
+  // Resolve from the server workspace; Windows cannot execute .cmd with shell:false.
+  const cli = require.resolve("prisma/build/index.js", { paths: [serverDir] });
+  const result = spawnSync(process.execPath, [cli, ...args], {
     cwd: serverDir,
     encoding: "utf8",
     env: prismaEnv(databaseUrl),
+    shell: false,
+    timeout: 120_000,
+    killSignal: "SIGTERM",
     ...options,
   });
   return result;
+}
+
+function childProcessFailure(result, command) {
+  const status = result?.status == null ? "null" : String(result.status);
+  const signal = result?.signal || "none";
+  const stderr = String(result?.stderr || "").trim();
+  const stdout = String(result?.stdout || "").trim();
+  const spawnError = result?.error ? `${result.error.code || "spawn-error"}: ${result.error.message}` : "";
+  const details = [stderr, stdout, spawnError].filter(Boolean).join("\n");
+  return `${command} failed (status=${status}, signal=${signal})${details ? `:\n${details}` : ": no stdout/stderr captured"}`;
 }
 
 function parseArgs(argv) {
@@ -369,7 +384,7 @@ function generateCurrentSchemaScript(databaseUrl) {
     "--script",
   ]);
   if (result.status !== 0) {
-    throw new Error(`prisma migrate diff failed:\n${result.stderr || result.stdout}`);
+    throw new Error(childProcessFailure(result, "prisma migrate diff"));
   }
   const sql = result.stdout || "";
   if (SQLITE_DIALECT_FINGERPRINT.test(sql)) {
@@ -388,7 +403,7 @@ function applySqlFile(databaseUrl, filePath) {
     filePath,
   ]);
   if (result.status !== 0) {
-    throw new Error(`prisma db execute failed:\n${result.stderr || result.stdout}`);
+    throw new Error(childProcessFailure(result, "prisma db execute"));
   }
 }
 
@@ -403,7 +418,7 @@ function stampAllMigrations(databaseUrl, names) {
       name,
     ]);
     if (result.status !== 0) {
-      throw new Error(`prisma migrate resolve --applied ${name} failed:\n${result.stderr || result.stdout}`);
+      throw new Error(childProcessFailure(result, `prisma migrate resolve --applied ${name}`));
     }
   }
 }
@@ -411,7 +426,7 @@ function stampAllMigrations(databaseUrl, names) {
 function migrateDeploy(databaseUrl) {
   const result = runPrisma(databaseUrl, ["migrate", "deploy", "--config", "prisma.config.ts"]);
   if (result.status !== 0) {
-    throw new Error(`prisma migrate deploy failed:\n${result.stderr || result.stdout}`);
+    throw new Error(childProcessFailure(result, "prisma migrate deploy"));
   }
   return result;
 }
@@ -506,7 +521,9 @@ module.exports = {
   listMigrationNames,
   redactDatabaseUrl,
   requirePostgresUrl,
+  runPrisma,
   generateCurrentSchemaScript,
+  childProcessFailure,
   postgresSchemaPath,
   postgresMigrationsDir,
 };

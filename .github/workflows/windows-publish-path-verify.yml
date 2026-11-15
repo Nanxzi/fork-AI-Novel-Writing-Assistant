@@ -1,0 +1,51 @@
+# Non-publish Windows verification for the desktop packaging path.
+# Does not tag, upload packages, or invoke Desktop Release.
+# Intentionally excludes runnerIsolation fixture self-tests (known Windows timeout);
+# those remain in regular server test CI and must not block packaging merge/release.
+name: Windows Publish Path Verify
+
+on:
+  pull_request:
+    branches: [main, beta]
+  push:
+    branches:
+      - cursor/win-publish-fix-speedup-54f3
+      - main
+      - beta
+
+permissions:
+  contents: read
+
+jobs:
+  windows-publish-path:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10.6.0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm --filter @ai-novel/shared build
+
+      - run: pnpm --filter @ai-novel/server prisma:generate
+
+      - run: pnpm --filter @ai-novel/server build
+
+      - name: Probe production Node Prisma migrate diff on Windows
+        run: node scripts/desktop-release/probe-win-pnpm-spawn.cjs
+
+      - name: Targeted Windows packaging-path server tests
+        working-directory: server
+        run: node --test tests/postgresMigrateDeployPath.test.js
+
+      - run: pnpm --filter @ai-novel/desktop build
+      # Portable release-guards / Mintlify sync tests run on Ubuntu release-checks, not Windows packaging-path verify.

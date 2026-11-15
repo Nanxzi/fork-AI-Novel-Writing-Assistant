@@ -13,6 +13,8 @@ const {
   listMigrationNames,
   requirePostgresUrl,
   generateCurrentSchemaScript,
+  runPrisma,
+  childProcessFailure,
   postgresSchemaPath,
   postgresMigrationsDir,
 } = require("../../scripts/deploy-prisma-postgres.cjs");
@@ -160,6 +162,37 @@ test("deploy script rejects SQLite URLs and requires DATABASE_URL", () => {
   assert.throws(() => requirePostgresUrl("file:./dev.db"), /not SQLite/);
   assert.throws(() => requirePostgresUrl("sqlite:foo"), /not SQLite/);
   assert.equal(requirePostgresUrl("postgresql://app@127.0.0.1:5432/tmp"), "postgresql://app@127.0.0.1:5432/tmp");
+});
+
+test("child process failures retain Windows status, signal, and captured output", () => {
+  assert.match(
+    childProcessFailure({ status: null, signal: "SIGTERM", stderr: "prisma\nerror", stdout: "out" }, "prisma migrate diff"),
+    /status=null, signal=SIGTERM[\s\S]*prisma[\s\S]*error/,
+  );
+  assert.match(
+    childProcessFailure({ status: null, signal: null, error: { code: "EINVAL", message: "spawn node EINVAL" } }, "prisma migrate diff"),
+    /EINVAL: spawn node EINVAL/,
+  );
+  assert.match(
+    childProcessFailure({ status: null, signal: "SIGTERM", error: { code: "ETIMEDOUT", message: "spawn node ETIMEDOUT" }, stdout: "partial output", stderr: "partial error" }, "prisma migrate diff"),
+    /signal=SIGTERM[\s\S]*partial error[\s\S]*partial output[\s\S]*ETIMEDOUT/,
+  );
+});
+
+test("production Prisma launch preserves schema paths containing spaces and shell metacharacters", () => {
+  const os = require("node:os");
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "prisma path & spaces-"));
+  const schema = path.join(directory, "schema & probe.prisma");
+  try {
+    fs.copyFileSync(postgresSchemaPath, schema);
+    const result = runPrisma("postgresql://app@127.0.0.1:5432/unused", [
+      "migrate", "diff", "--config", "prisma.config.ts", "--from-empty", `--to-schema=${schema}`, "--script",
+    ]);
+    assert.equal(result.status, 0, childProcessFailure(result, "Prisma path with spaces"));
+    assert.match(result.stdout, /CREATE TABLE "Novel"/);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("prisma migrate diff from empty to current PG schema is dialect-safe and includes 0.8.2 objects", () => {
