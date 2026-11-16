@@ -8,6 +8,10 @@
 <p align="center"><sub>Open-source AI novel writing assistant and long-form production studio.</sub></p>
 
 <p align="center">
+  <a href="https://biznovelstudio.com"><strong>🌐 项目官网｜使用文档、下载安装与更新说明</strong></a>
+</p>
+
+<p align="center">
   <a href="https://github.com/ExplosiveCoderflome/AI-Novel-Writing-Assistant/releases/latest"><img src="https://img.shields.io/github/v/release/ExplosiveCoderflome/AI-Novel-Writing-Assistant?style=flat-square&amp;label=Windows%20%E6%A1%8C%E9%9D%A2%E7%89%88&amp;color=17556b" alt="最新桌面版本" /></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-17556b?style=flat-square" alt="AGPL-3.0 许可证" /></a>
   <a href="https://linux.do/"><img src="https://img.shields.io/badge/LINUX%20DO-%E7%A4%BE%E5%8C%BA-FDD835?style=flat-square&amp;labelColor=222" alt="LINUX DO 社区" /></a>
@@ -34,7 +38,7 @@
 
 <p align="center">
   <a href="https://github.com/ExplosiveCoderflome/AI-Novel-Writing-Assistant/releases/latest"><strong>下载 Windows 桌面版</strong></a> ·
-  <a href="https://ai-novel-writing-assistant.mintlify.site">项目介绍与文档</a> ·
+  <a href="https://biznovelstudio.com">项目官网与文档</a> ·
   <a href="#快速开始">第一次使用</a> ·
   <a href="#源码运行">源码运行</a> ·
   <a href="https://github.com/ExplosiveCoderflome/AI-Novel-Writing-Assistant/issues">问题反馈</a>
@@ -50,21 +54,20 @@
 
 ## 最新更新
 
-### 2026-11-14
+### 2026-11-16 · v0.8.7
 
-`v0.8.5` 修复 Windows 正式打包，并加快发布检查：可移植全量检查在 Ubuntu 完成一次后复用，Windows 保留迁移、生产数据库探测与平台打包验收。安装包以上线后的 GitHub Release 为准；完整五平台请下载 `v0.8.5`。
-
-#### 优化
-
-- 桌面发布等待更短：全量可移植检查只在 Ubuntu 跑一遍，各平台打包复用同一通过记录。
+桌面版本 `v0.8.7`：大纲「交互完善」提案在依赖写错、章节未标明所属卷或误改卷章节列表时，会给出可读中文提示并拒绝采纳，不再出现笼统的服务器错误；采纳失败不会留下半截结果。书级方案生成固定关闭深度思考、输出上限随候选数量调整，遇 Token 上限自动换路重试，失败卡上一键恢复。
 
 #### 修复
 
-- Windows 安装包可走完正式打包；`v0.8.4` 仅有 Linux / macOS 包时，请改用本版。
+- 大纲「交互完善」提案：依赖写错成节点编号、新增章节未标明所属卷、或误改卷的章节列表时，会给出可读的中文提示并拒绝采纳，不再出现笼统的服务器错误；采纳失败不会留下半截结果。
+- 书级方案生成固定关闭深度思考，输出上限随候选数量调整，模型路由上已配更高上限时以路由为准。
+- 书级方案生成遇输出 Token 上限时自动提高上限重试一次，上限封顶 32768；其他失败原因不重试。
+- 书级方案生成失败时，失败卡上出现恢复按钮：关闭深度思考并重试、提高输出上限并重试（上限已满时不出现），点一下改设置并原地重试。
 
 [查看完整更新历史](docs/releases/release-notes.md)
 
-正式桌面版以 GitHub Release 的 **v0.8.5** 五平台安装包为准；`v0.8.4` 缺 Windows 包，`v0.8.3` 标签曾推送但打包失败、无安装包，`v0.8.2` 附注标签也不对应可下载版本。功能与致谢见[完整更新历史](docs/releases/release-notes.md)。
+正式桌面版以 GitHub Release 的 **v0.8.7** 五平台安装包为准；`v0.8.6` 为上一完整五平台版本，`v0.8.5` 亦为完整五平台，`v0.8.4` 缺 Windows 包，`v0.8.3` 标签曾推送但打包失败、无安装包，`v0.8.2` 附注标签也不对应可下载版本。功能与致谢见[完整更新历史](docs/releases/release-notes.md)。
 
 
 ## 现在已经能做什么
@@ -310,7 +313,7 @@ V1 与 V2 分别编排这条链，已保存的小说资料可以复用。章节�
 | 原理、模块边界与开发规范 | [开发 Wiki](./docs/wiki/README.md) · [文档目录](./docs/README.md) · [协作规则](./AGENTS.md) |
 | 历史更新与后续方向 | [完整更新记录](./docs/releases/release-notes.md) · [当前路线图](./TASK.md) |
 
-也可以在[在线文档站](https://ai-novel-writing-assistant.mintlify.site)搜索模块与使用问题。
+也可以在[在线文档站](https://biznovelstudio.com)搜索模块与使用问题。
 
 ## 源码运行
 

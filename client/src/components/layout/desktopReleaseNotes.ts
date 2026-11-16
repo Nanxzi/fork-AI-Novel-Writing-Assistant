@@ -8,6 +8,14 @@ export interface DesktopReleaseNotes {
   items: string[];
 }
 
+/**
+ * In-app desktop update popup. Bound to the current package version via APP_VERSION
+ * (from desktop/package.json at build time) and the matching
+ * `### YYYY-MM-DD · vX.Y.Z` block in docs/releases/release-notes.md.
+ * For v0.8.7 that block covers recoverable Chinese errors for outline interactive
+ * edit proposals (bad dependsOn, missing volume ownership, chapterNodeIds shortcut),
+ * plus book-level candidate Token-budget retry and one-click recovery on the failure card.
+ */
 function currentRelease(markdown: string): DesktopReleaseNotes {
   const version = APP_VERSION;
   const heading = new RegExp(`^###\\s+\\d{4}-\\d{2}-\\d{2}\\s+·\\s+v${version.replaceAll(".", "\\.")}\\s*$`, "m");
