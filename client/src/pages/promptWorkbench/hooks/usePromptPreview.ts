@@ -11,6 +11,7 @@ import {
 } from "@/api/promptWorkbench";
 import { useSSE } from "@/hooks/useSSE";
 import type { PromptSlotDrafts } from "../promptWorkbenchTypes";
+import { buildOpeningDirectionPreview } from "../openingDirectionPreview";
 
 interface PreviewNovel {
   id: string;
@@ -111,6 +112,18 @@ function buildPreviewPromptInput(
   previewNovel?: PreviewNovel | null,
   previewChapter?: PreviewChapter | null,
 ): Record<string, unknown> {
+  if (prompt.id === "novel.director.candidate_titles") {
+    return {
+      context: {
+        genreName: "架空历史", count: 4,
+        brief: [
+          "故事灵感：边关小卒每天替将军写家书。",
+          "本案方向：小卒发现家书暗藏布防图，只能借下一封信向伙夫求证，写下的每个字都可能暴露自己。",
+          "同轮另一方案（仅作比较）：小卒与伙夫各握一半证据，必须说服对方交底才能救城。",
+        ].join("\n"),
+      },
+    };
+  }
   if (prompt.id === "outline.workbench_dialogue") {
     return { requestText: "我想写一个替人保管记忆的女孩。帮我比较两种开篇方向。", baseVersion: 1,
       document: { story: { title: "记忆寄存处" }, volumes: [], chapters: [], characters: [], facts: [], payoffs: [] }, priorProposal: null, history: [] };
@@ -382,9 +395,10 @@ export function usePromptPreview(input: UsePromptPreviewInput) {
     const executionNovelId = novelId || undefined;
     const executionChapterId = novelId ? chapterId || previewChapter?.id : undefined;
     const hasRealChapterContext = Boolean(novelId && executionChapterId && previewChapter);
+    const openingPreview = buildOpeningDirectionPreview(prompt);
     return {
       promptKey: prompt.key,
-      promptInput: buildPreviewPromptInput(prompt, previewNovel, previewChapter),
+      promptInput: openingPreview?.promptInput ?? buildPreviewPromptInput(prompt, previewNovel, previewChapter),
       executionContext: {
         entrypoint,
         novelId: executionNovelId,
@@ -394,7 +408,7 @@ export function usePromptPreview(input: UsePromptPreviewInput) {
           novelId: executionNovelId,
           ...(executionChapterId ? { chapterId: executionChapterId } : {}),
         },
-        metadata: buildPreviewExecutionMetadata(prompt, hasRealChapterContext),
+        metadata: openingPreview?.metadata ?? buildPreviewExecutionMetadata(prompt, hasRealChapterContext),
       },
       maxContextTokens: prompt.contextPolicy.maxTokensBudget,
       slotOverrides,
